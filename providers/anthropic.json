@@ -1,0 +1,14 @@
+{
+  "name": "Anthropic",
+  "backend": "anthropic",
+  "base_url": "https://api.anthropic.com",
+  "api_path": "/v1/messages",
+  "auth": "x-api-key",
+  "tier": 1,
+  "models": [
+    { "id": "claude-opus-4-7",       "display": "Claude Opus 4.7",   "input_per_1m": 15.00, "output_per_1m": 75.00 },
+    { "id": "claude-sonnet-4-6",     "display": "Claude Sonnet 4.6", "input_per_1m":  3.00, "output_per_1m": 15.00 },
+    { "id": "claude-haiku-4-5-20251001", "display": "Claude Haiku 4.5", "input_per_1m": 0.80, "output_per_1m":  4.00 }
+  ],
+  "default_model": "claude-sonnet-4-6"
+}

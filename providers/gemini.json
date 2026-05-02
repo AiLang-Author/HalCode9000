@@ -1,0 +1,15 @@
+{
+  "name": "Google",
+  "backend": "openai",
+  "base_url": "https://generativelanguage.googleapis.com",
+  "api_path": "/v1beta/openai/chat/completions",
+  "auth": "bearer",
+  "tier": 2,
+  "models": [
+    { "id": "gemini-2.5-pro",        "display": "Gemini 2.5 Pro",   "input_per_1m":  1.25, "output_per_1m": 10.00 },
+    { "id": "gemini-2.5-flash",      "display": "Gemini 2.5 Flash", "input_per_1m":  0.15, "output_per_1m":  0.60 },
+    { "id": "gemini-2.0-flash",      "display": "Gemini 2.0 Flash", "input_per_1m":  0.10, "output_per_1m":  0.40 },
+    { "id": "gemini-2.5-flash-lite", "display": "Gemini 2.5 Flash Lite", "input_per_1m": 0.10, "output_per_1m": 0.40 }
+  ],
+  "default_model": "gemini-2.5-flash"
+}

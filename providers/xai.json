@@ -1,0 +1,14 @@
+{
+  "name": "xAI",
+  "backend": "openai",
+  "base_url": "https://api.x.ai",
+  "api_path": "/v1/chat/completions",
+  "auth": "bearer",
+  "tier": 1,
+  "models": [
+    { "id": "grok-3",       "display": "Grok 3",      "input_per_1m":  3.00, "output_per_1m": 15.00 },
+    { "id": "grok-3-mini",  "display": "Grok 3 Mini", "input_per_1m":  0.30, "output_per_1m":  0.50 },
+    { "id": "grok-2-1212",  "display": "Grok 2",      "input_per_1m":  2.00, "output_per_1m": 10.00 }
+  ],
+  "default_model": "grok-3"
+}

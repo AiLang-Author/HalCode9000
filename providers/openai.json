@@ -1,0 +1,15 @@
+{
+  "name": "OpenAI",
+  "backend": "openai",
+  "base_url": "https://api.openai.com",
+  "api_path": "/v1/chat/completions",
+  "auth": "bearer",
+  "tier": 1,
+  "models": [
+    { "id": "gpt-4o",           "display": "GPT-4o",         "input_per_1m":  2.50, "output_per_1m": 10.00 },
+    { "id": "gpt-4o-mini",      "display": "GPT-4o mini",    "input_per_1m":  0.15, "output_per_1m":  0.60 },
+    { "id": "o3",               "display": "o3",             "input_per_1m": 10.00, "output_per_1m": 40.00 },
+    { "id": "o4-mini",          "display": "o4-mini",        "input_per_1m":  1.10, "output_per_1m":  4.40 }
+  ],
+  "default_model": "gpt-4o"
+}

@@ -1,0 +1,15 @@
+{
+  "name": "Groq",
+  "backend": "openai",
+  "base_url": "https://api.groq.com",
+  "api_path": "/openai/v1/chat/completions",
+  "auth": "bearer",
+  "tier": 3,
+  "models": [
+    { "id": "llama-3.3-70b-versatile",  "display": "Llama 3.3 70B",    "input_per_1m": 0.59, "output_per_1m": 0.79 },
+    { "id": "llama-3.1-8b-instant",     "display": "Llama 3.1 8B",     "input_per_1m": 0.05, "output_per_1m": 0.08 },
+    { "id": "gemma2-9b-it",             "display": "Gemma 2 9B",        "input_per_1m": 0.20, "output_per_1m": 0.20 },
+    { "id": "moonshotai/kimi-k2-instruct", "display": "Kimi K2",        "input_per_1m": 1.00, "output_per_1m": 3.00 }
+  ],
+  "default_model": "llama-3.3-70b-versatile"
+}
