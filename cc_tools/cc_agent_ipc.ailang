@@ -290,7 +290,8 @@ SubRoutine.Main {
 
     fd = Socket.Create(1, 1)
     IfCondition LessThan(fd, 0) ThenBlock: { Exit(1) }
-    Socket.BindUnix(fd, AgentConst.SOCK_PATH)
+    bind_rc = Socket.BindUnix(fd, AgentConst.SOCK_PATH)
+    IfCondition LessThan(bind_rc, 0) ThenBlock: { Exit(1) }
     Socket.Listen(fd, AgentConst.BACKLOG)
     AgentState.listen_fd = fd
 
