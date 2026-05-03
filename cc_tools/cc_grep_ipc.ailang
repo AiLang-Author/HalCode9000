@@ -823,6 +823,9 @@ Function.CCGrep_ProcessStream {
                     IfCondition GreaterThan(CCGrepCtx.after_rem, 0) ThenBlock: {
                         CCGrep_EmitLine(line_buf, line_len, line_no, label, 45)  // '-'
                         CCGrepCtx.after_rem = Subtract(CCGrepCtx.after_rem, 1)
+                        IfCondition GreaterThan(CCGrepState.truncated, 0) ThenBlock: {
+                            stop_early = 1
+                        }
                     } ElseBlock: {
                         IfCondition GreaterThan(GrepConfig.before_ctx, 0) ThenBlock: {
                             CCGrep_PushRing(line_buf, line_len, line_no)
@@ -1133,10 +1136,20 @@ Function.CCGrep_HandleRequest {
             CCGrep_AddPattern(pattern)
             CCGrep_CompilePatterns()
 
-            // Run search
-            IfCondition EqualTo(GrepConfig.recursive, 1) ThenBlock: {
-                CCGrep_ProcessDir(path, 0)
+            // Run search — detect path type first (BUG-1 fix)
+            dir_fd = SystemCall(CCGrepSys.SYS_OPENAT, CCGrepSys.AT_FDCWD, path, BitwiseOr(CCGrepSys.O_RDONLY, CCGrepSys.O_DIRECTORY))
+            IfCondition GreaterEqual(dir_fd, 0) ThenBlock: {
+                // path is a directory
+                IfCondition EqualTo(GrepConfig.recursive, 1) ThenBlock: {
+                    SystemCall(CCGrepSys.SYS_CLOSE, dir_fd, 0, 0, 0, 0)
+                    CCGrep_ProcessDir(path, 0)
+                } ElseBlock: {
+                    SystemCall(CCGrepSys.SYS_CLOSE, dir_fd, 0, 0, 0, 0)
+                    CCGrep_SendError(client_fd, id, StringConcat("is a directory; use recursive=1: ", path))
+                    JSON.Free(parsed)  ReturnValue(0)
+                }
             } ElseBlock: {
+                // not a directory — treat as single file
                 fd = SystemCall(CCGrepSys.SYS_OPENAT, CCGrepSys.AT_FDCWD, path, 0)
                 IfCondition LessThan(fd, 0) ThenBlock: {
                     CCGrep_SendError(client_fd, id, StringConcat("cannot open: ", path))

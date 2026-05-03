@@ -296,6 +296,7 @@ Function.UI_PromptColor {
 
 Function.UI_PaintTopRule {
     Body: {
+        TUI_ResetColor()
         TUI_MoveTo(UI_TopRuleRow(), 1)
         TUI_BufferChar(27)
         TUI_BufferWriteStr("[K")
@@ -363,6 +364,7 @@ Function.UI_PaintTopRule {
                 
                 i = start_idx
                 WhileLoop LessThan(i, r_len) {
+                    IfCondition GreaterEqual(chars_drawn, Subtract(total_target, 4)) ThenBlock: { BreakLoop }
                     ch = GetByte(UILayout.reasoning_str, i)
                     IfCondition Or(EqualTo(ch, 10), EqualTo(ch, 13)) ThenBlock: { ch = 32 }
                     
@@ -396,6 +398,7 @@ Function.UI_PaintTopRule {
 
 Function.UI_PaintBotRule {
     Body: {
+        TUI_ResetColor()
         TUI_MoveTo(UI_BotRuleRow(), 1)
         TUI_BufferChar(27)
         TUI_BufferWriteStr("[K")
@@ -414,6 +417,7 @@ Function.UI_PaintBotRule {
 
 Function.UI_PaintBodyRow {
     Body: {
+        TUI_ResetColor()
         r = UI_BodyRow()
         body_lines = Subtract(UILayout.prompt_h, 3)
         i = 0
