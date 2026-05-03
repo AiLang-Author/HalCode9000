@@ -149,7 +149,7 @@ Function.UI_TUI_FgRGB {
 Function.UI_GetHintText {
     Output: Address
     Body: {
-        ReturnValue(" /help · /clear · /quit")
+        ReturnValue(" /help · /clear · /home · /quit")
     }
 }
 
@@ -1828,8 +1828,8 @@ Function.UI_SplashGetEnv {
 // =============================================================================
 
 FixedPool.UIAniK {
-    "LOGO_W":  Initialize=47
-    "BUF_SZ":  Initialize=1024
+    "LOGO_W":  Initialize=68
+    "BUF_SZ":  Initialize=2048
     "EYE_B0":  Initialize=226
     "EYE_B1":  Initialize=151
     "EYE_B2":  Initialize=137
@@ -1913,17 +1913,17 @@ Function.UIAni_FgRGB {
     }
 }
 
-// Returns one of the 5 logo row strings for HALCODE (47 chars each).
-// Logo is a simple # block art. O interior (cols 29-31) is 3 spaces on rows 1-3.
+// Returns one of the 5 logo row strings for HALCODE (68 chars each).
+// 8-wide letters, 2-char gaps. O interior (cols 42-45) is 4 spaces on rows 1-3.
 Function.UIAni_LogoRow {
     Input: row: Integer
     Output: Address
     Body: {
-        IfCondition EqualTo(row, 0) ThenBlock: { ReturnValue("#   #   ###  #      ####   ###   ####  #####") }
-        IfCondition EqualTo(row, 1) ThenBlock: { ReturnValue("#   #  #   # #    #      #   # #   # #    ") }
-        IfCondition EqualTo(row, 2) ThenBlock: { ReturnValue("#####  ##### #    #      #   # #   # ###  ") }
-        IfCondition EqualTo(row, 3) ThenBlock: { ReturnValue("#   #  #   # #    #      #   # #   # #    ") }
-        ReturnValue("#   #   ###  ##### ####   ###   ####  #####")
+        IfCondition EqualTo(row, 0) ThenBlock: { ReturnValue("##    ##    ####    ##         ######    ######   ######    ########") }
+        IfCondition EqualTo(row, 1) ThenBlock: { ReturnValue("##    ##   ##  ##   ##        ##        ##    ##  ##    ##  ##      ") }
+        IfCondition EqualTo(row, 2) ThenBlock: { ReturnValue("########  ########  ##        ##        ##    ##  ##    ##  ######  ") }
+        IfCondition EqualTo(row, 3) ThenBlock: { ReturnValue("##    ##  ##    ##  ##        ##        ##    ##  ##    ##  ##      ") }
+        ReturnValue("##    ##  ##    ##  ########   ######    ######   ######    ########")
     }
 }
 
@@ -2027,7 +2027,7 @@ Function.UI.StartupAnimation {
             reveal_l = UIAniK.LOGO_W
             reveal_r = 0
             IfCondition LessThan(frame, 5) ThenBlock: {
-                reveal_l = Multiply(Add(frame, 1), 8)
+                reveal_l = Multiply(Add(frame, 1), 14)
                 reveal_r = reveal_l
             }
 
@@ -2055,11 +2055,11 @@ Function.UI.StartupAnimation {
                 orbit_idx = Modulo(frame, 4)
                 orb_row = 1
                 IfCondition GreaterThan(orbit_idx, 1) ThenBlock: { orb_row = 3 }
-                orb_col = Add(lpad, 30)
-                IfCondition EqualTo(orbit_idx, 1) ThenBlock: { orb_col = Add(lpad, 32) }
-                IfCondition EqualTo(orbit_idx, 2) ThenBlock: { orb_col = Add(lpad, 32) }
+                orb_col = Add(lpad, 43)
+                IfCondition EqualTo(orbit_idx, 1) ThenBlock: { orb_col = Add(lpad, 46) }
+                IfCondition EqualTo(orbit_idx, 2) ThenBlock: { orb_col = Add(lpad, 46) }
                 pos = UIAni_Goto(buf, pos, Add(UIAniState.logo_row, orb_row), orb_col)
-                pos = UIAni_FgRGB(buf, pos, 255, 220, 30)
+                pos = UIAni_FgRGB(buf, pos, 255, 0, 0)
                 SetByte(buf, pos, UIAniK.EYE_B0) pos = Add(pos, 1)
                 SetByte(buf, pos, UIAniK.EYE_B1) pos = Add(pos, 1)
                 SetByte(buf, pos, UIAniK.EYE_B2) pos = Add(pos, 1)

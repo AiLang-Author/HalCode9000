@@ -214,15 +214,24 @@ HalCode9000.ailang imports backends/ and UI.ailang transitively — a single com
 ### Provider menu (startup)
 
 ```
-1. Anthropic  (claude-sonnet-4-6)
-2. OpenAI     (gpt-4o)
-3. Grok       (xAI) — grok-3-mini-fast  ← NOTE: Grok/xAI, NOT Groq (different company)
-4. Gemini     (gemini-2.0-flash)
-5. Local      (localhost:11434, ollama)
-6. DeepSeek   (deepseek-v4-flash)
+1. Anthropic   (claude-sonnet-4-6)
+2. OpenAI      (gpt-4o)
+3. Grok        (xAI) — grok-3-mini-fast
+4. Gemini      (gemini-2.0-flash)
+5. Local       (localhost:11434, ollama)
+6. DeepSeek    (deepseek-v4-flash)
+7. OpenRouter  (model sub-menu: a-e presets + m manual + q back)
+--- User Connections ---
+8+. Loaded from ~/.halcode/connections/*.json at startup
+a.  Add connection (interactive: backend type, name, model, base URL, key hint)
+q.  Quit
 ```
 
-Option 3 is **Grok by xAI** (`api.x.ai`). The HalCode9000.ailang currently labels it "Groq" — needs renaming to "Grok / xAI".
+**OpenRouter** uses the OpenAI backend (pure OpenAI-compat). `base_url = https://openrouter.ai/api`, `api_path = /v1/chat/completions`. `OPENROUTER_API_KEY` env var is checked automatically. In-chat `/model` hint shows OpenRouter model IDs when OpenRouter is active.
+
+**Grok** (`api.x.ai`) — option 3, NOT Groq (different company). `XAI_API_KEY` env var is checked automatically.
+
+**Custom connections** are stored as JSON files in `~/.halcode/connections/conn_<timestamp>.json`. Built with raw `StringConcat` (NOT `Library.JSON`) to avoid the known XSHash collision bug that corrupts `key_hint` and `default_model` on write. Loaded via `Backend.LoadProviders()` at menu startup; re-scanned after a new connection is added.
 
 ### UI layout (5-row prompt, as of 2026-04-30)
 
@@ -239,6 +248,26 @@ Option 3 is **Grok by xAI** (`api.x.ai`). The HalCode9000.ailang currently label
 - `UI.SetQuote(text)` — paints a dim status/quote line above the prompt box
 - `UI.AnimTick()` — ticks mascot animation during model TTFT wait (call from idle poll loop)
 - `UI.ChatPrintDim(s)` — dim+italic print for DeepSeek reasoning_content stream
+
+### Stream-drop stability fixes (2026-05-03)
+
+Three changes that work together to reduce the cost and corruption of mid-stream API drops:
+
+**1. CC_TurnLog** (`HalCode9000.ailang`) — on every completed tool call, appends `[ToolName] arg_summary\n<first 4096 bytes of content>\n---\n` to `/tmp/hal_turn_log.txt` (O_APPEND, mode 0644). Preserves completed work even if the stream drops before the model finishes the turn. Error message on final retry now tells the user to check this file.
+
+**2. max_retries reduced 5 → 3** — cuts wasted API spend by 40% on persistent drops. The turn log makes retry reduction safe.
+
+**3. Write tool 40KB size guard** (`cc_tools/cc_write_ipc.ailang`) — if `content` exceeds 40,000 bytes, returns an error immediately with the byte count and a message telling the model to split into ≤500-line chunks. Prevents oversized Write calls from triggering stream drops in the first place.
+
+### UI corruption fixes after stream drop (2026-05-03)
+
+Three bugs caused visual corruption when a stream dropped mid-turn:
+
+**Bug 1 — orphaned "⚙ Preparing tool:" line** (`backends/OpenAI.ailang`): When the first `tool_use` delta arrived during SSE streaming, `UI.ChatTag("⚙", "Preparing tool: <name>", 8)` was emitted. On stream drop this line was left in chat with no corresponding tool result. **Fix**: removed the `UI.ChatTag` call entirely — `UI.ToolCallStart` already handles tool-start display.
+
+**Bug 2 — animation characters bleeding into prompt frame** (`HalCode9000.ailang`): After a stream drop `ui_state` stayed at 1 (waiting/streaming), so `UI.AnimTick()` kept painting mascot chars `▅▇ ⠸ ▃▇` and the elapsed timer into prompt frame rows during the retry `CC_SleepMs` delays. **Fix**: added `UI.SetState(0)` immediately after `UI.ChatTag("✗", "API connection dropped...")`. Each retry re-enters state 1 via `UI.SetState(1)` at the top of the retry loop — so the fix only affects the inter-retry idle period.
+
+**Bug 3 — reasoning content overflowing top rule bracket**: When `ui_state = 1` and `UILayout.reasoning_str` contains large DeepSeek thinking content, `UI_PaintTopRule` renders it in the `┌─[ ... ]──` bracket. Long strings overflow the terminal line width, pushing all subsequent rows down and causing mascot chars to appear in the bottom rule. **Fix**: same `UI.SetState(0)` call — with `ui_state != 1`, `UI_PaintTopRule` no longer shows reasoning content.
 
 ### Known UI.ailang issue to never repeat
 

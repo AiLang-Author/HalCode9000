@@ -287,10 +287,6 @@ Function.OpenAI_ParseToolCallDelta {
                     OAIState.tool_count = Add(idx, 1)
                 }
                     
-                IfCondition EqualTo(is_first, 1) ThenBlock: {
-                    msg = StringConcat("Preparing tool: ", name_str)
-                    UI.ChatTag("⚙", msg, 8) // 8 = DIM_FG
-                }
             }
 
             args_str = JSON.GetString(fn_obj, "arguments")

@@ -140,6 +140,23 @@ Function.CCWrite_Do {
         }
         IfCondition EqualTo(content, 0) ThenBlock: { content = "" }
 
+        // Block oversized writes — streaming huge content arguments causes TCP stream drops.
+        clen = StringLength(content)
+        IfCondition GreaterThan(clen, 40000) ThenBlock: {
+            msg1 = "Content too large for a single Write ("
+            cs = NumberToString(clen)
+            msg2 = " bytes). Split into multiple Write calls of <=500 lines each and write them sequentially."
+            i = 0
+            WhileLoop LessThan(i, StringLength(msg1)) { SetByte(err_buf, i, GetByte(msg1, i))  i = Add(i, 1) }
+            j = 0
+            WhileLoop LessThan(j, StringLength(cs)) { SetByte(err_buf, Add(i, j), GetByte(cs, j))  j = Add(j, 1) }
+            i = Add(i, j)
+            j = 0
+            WhileLoop LessThan(j, StringLength(msg2)) { SetByte(err_buf, Add(i, j), GetByte(msg2, j))  j = Add(j, 1) }
+            SetByte(err_buf, Add(i, j), 0)
+            ReturnValue(-1)
+        }
+
         // Block writes to OS-critical directories
         IfCondition EqualTo(CCWrite_IsSystemPath(path), 1) ThenBlock: {
             msg = "Blocked: writing to OS system directory is not allowed: "
