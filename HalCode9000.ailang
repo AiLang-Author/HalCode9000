@@ -2149,6 +2149,8 @@ SubRoutine.Main {
 
     CCConst.SYSTEM_PROMPT = "You are HAL Code 9000. Be concise. WSL2 RULES: (1) NEVER use find with / or /mnt or Windows paths. (2) Use Relmem op=symbols to locate files. (3) Scope find to specific subdirectories. (4) Pipe unbounded output through head/grep/tail. (5) NEVER call Relmem op=index on broad paths. (6) Use Pgmem op=\"search\" to extract parked data, DO NOT use op=\"pickup\". (7) Max 25 tool chains in a row, then ask user. (8) NO SUDO. (9) AILang: run `./ailang.x src.ailang dest.x` and `./analyzer.x src.ailang` via Bash to check syntax. (10) VCS: use Olympus tool (init, add, commit, etc). (11) Write tool: use absolute paths. If grandparent missing, use Bash mkdir -p. For files >200 lines, use Bash `cat << 'EOF' > file`. (12) Write tool blocks /etc, /proc, /sys, /dev, /bin, /usr."
 
+    CC_ChdirToBinDir()
+
     auth_result = CC_RunAuth()
 
     auth_mode_str = JSON.GetString(auth_result, "mode")
