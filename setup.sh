@@ -411,18 +411,46 @@ fi
 echo ""
 
 # =============================================================================
+# STEP 6 — Register MCP server with Claude Code
+# =============================================================================
+divider
+echo -e "${BOLD}  STEP 6 — MCP server registration${RESET}"
+divider
+
+MCP_REGISTERED=0
+if command -v claude &>/dev/null; then
+  info "Registering HalCode9000 as an MCP server in Claude Code..."
+  if claude mcp add halcode9000 -- "${SCRIPT_DIR}/HalCode9000.x" --mcp 2>/dev/null; then
+    success "MCP server 'halcode9000' registered."
+    MCP_REGISTERED=1
+  else
+    warn "claude mcp add failed — you may need to register manually:"
+    note "  claude mcp add halcode9000 -- ${SCRIPT_DIR}/HalCode9000.x --mcp"
+  fi
+else
+  warn "claude CLI not found on PATH. To register manually after installing Claude Code:"
+  note "  claude mcp add halcode9000 -- ${SCRIPT_DIR}/HalCode9000.x --mcp"
+fi
+
+echo ""
+
+# =============================================================================
 # Done
 # =============================================================================
 divider
 /usr/bin/echo ""
 /usr/bin/echo -e "${GREEN}${BOLD}  Setup complete.${RESET}"
 /usr/bin/echo ""
-/usr/bin/echo -e "  To start HalCode9000:"
+/usr/bin/echo -e "  To start HalCode9000 (interactive TUI):"
 /usr/bin/echo -e "    ${BOLD}source ${KEYSTORE_FILE}${RESET}"
 /usr/bin/echo -e "    ${BOLD}cd ${SCRIPT_DIR} && ./HalCode9000.x${RESET}"
 /usr/bin/echo ""
-/usr/bin/echo -e "  To use it as an MCP server in Claude Code:"
-/usr/bin/echo -e "    ${BOLD}claude mcp add halcode9000 -- ${SCRIPT_DIR}/HalCode9000.x --mcp${RESET}"
+if [[ "$MCP_REGISTERED" -eq 1 ]]; then
+  /usr/bin/echo -e "  MCP server: ${GREEN}registered${RESET} — restart Claude Code to activate."
+else
+  /usr/bin/echo -e "  MCP server: ${YELLOW}not registered${RESET} — run:"
+  /usr/bin/echo -e "    ${BOLD}claude mcp add halcode9000 -- ${SCRIPT_DIR}/HalCode9000.x --mcp${RESET}"
+fi
 /usr/bin/echo ""
 if [[ -n "${OLYMPUS_URL:-}" ]]; then
   /usr/bin/echo -e "  OlympusRepo is at: ${BOLD}${OLYMPUS_URL}${RESET}"
