@@ -117,6 +117,7 @@ FixedPool.STRATEGY {
 FixedPool.Scratch {
     "rx":    Initialize=0, CanChange=True
     "rx_lc": Initialize=0, CanChange=True
+    "digits":Initialize=0, CanChange=True
     "ready": Initialize=0, CanChange=True
 }
 
@@ -166,20 +167,18 @@ Function.CCGrep_AppendUInt {
         IfCondition EqualTo(v, 0) ThenBlock: {
             CCGrep_AppendByte(48)
         } ElseBlock: {
-            digits = Allocate(24)
             n = 0
             val = v
             WhileLoop GreaterThan(val, 0) {
-                SetByte(digits, n, Add(48, Modulo(val, 10)))
+                SetByte(Scratch.digits, n, Add(48, Modulo(val, 10)))
                 val = Divide(val, 10)
                 n = Add(n, 1)
             }
             i = Subtract(n, 1)
             WhileLoop GreaterEqual(i, 0) {
-                CCGrep_AppendByte(GetByte(digits, i))
+                CCGrep_AppendByte(GetByte(Scratch.digits, i))
                 i = Subtract(i, 1)
             }
-            Deallocate(digits, 24)
         }
     }
 }
@@ -341,7 +340,9 @@ Function.SearchBoyerMoore {
             IfCondition EqualTo(MemCompare(Add(line, cand), pat, plen), 0) ThenBlock: {
                 ReturnValue(cand)
             }
-            pos = Add(cand, 1)
+            skip = GetByte(table, GetByte(line, Add(cand, Subtract(plen, 1))))
+            IfCondition EqualTo(skip, 0) ThenBlock: { skip = 1 }
+            pos = Add(cand, skip)
         }
         ReturnValue(-1)
     }
@@ -434,10 +435,8 @@ Function.Match_RegexDFA {
     Output: Integer
     Body: {
         d = Regex_DFASearch(line, line_len)
-        IfCondition EqualTo(d, 1) ThenBlock: { ReturnValue(1) }
-        IfCondition EqualTo(d, 0) ThenBlock: { ReturnValue(0) }
-        rhandle = Dereference(Patterns.regex)
-        ReturnValue(Regex_Search(rhandle, line, line_len))
+        IfCondition GreaterEqual(d, 0) ThenBlock: { ReturnValue(1) }
+        ReturnValue(0)
     }
 }
 
@@ -589,6 +588,28 @@ Function.LineMatches {
 // =============================================================================
 // PATTERN MANAGEMENT
 // =============================================================================
+
+Function.CCGrep_FreePatterns {
+    Body: {
+        i = 0
+        WhileLoop LessThan(i, Patterns.count) {
+            p = Dereference(Add(Patterns.ptrs, Multiply(i, 8)))
+            IfCondition NotEqual(p, 0) ThenBlock: { Deallocate(p, 0) }
+            l = Dereference(Add(Patterns.lc_ptrs, Multiply(i, 8)))
+            IfCondition NotEqual(l, 0) ThenBlock: { Deallocate(l, 0) }
+            r = Dereference(Add(Patterns.regex, Multiply(i, 8)))
+            IfCondition NotEqual(r, 0) ThenBlock: { Regex_Free(r) }
+            b = Dereference(Add(Patterns.bc_tables, Multiply(i, 8)))
+            IfCondition NotEqual(b, 0) ThenBlock: { Deallocate(b, 0) }
+            pfx = Dereference(Add(Patterns.rx_prefix, Multiply(i, 8)))
+            IfCondition NotEqual(pfx, 0) ThenBlock: { Deallocate(pfx, 0) }
+            pbc = Dereference(Add(Patterns.rx_prefix_bc, Multiply(i, 8)))
+            IfCondition NotEqual(pbc, 0) ThenBlock: { Deallocate(pbc, 0) }
+            i = Add(i, 1)
+        }
+        Patterns.count = 0
+    }
+}
 
 Function.CCGrep_InitPatterns {
     Body: {
@@ -928,7 +949,8 @@ Function.CCGrep_ProcessDir {
                     IfCondition EqualTo(dtype, CCGrepSys.DT_DIR) ThenBlock: {
                         CCGrep_ProcessDir(child_buf, Add(depth, 1))
                     } ElseBlock: {
-                        IfCondition EqualTo(dtype, CCGrepSys.DT_REG) ThenBlock: {
+                        // DT_REG (8) or DT_UNKNOWN (0) — for filesystems without d_type support
+                        IfCondition Or(EqualTo(dtype, CCGrepSys.DT_REG), EqualTo(dtype, 0)) ThenBlock: {
                             include_ok = 1
                             IfCondition NotEqual(GrepConfig.include_pat, 0) ThenBlock: {
                                 include_ok = CCGrep_GlobMatch(dname, GrepConfig.include_pat)
@@ -1081,7 +1103,7 @@ Function.CCGrep_HandleRequest {
             CCGrepState.match_count     = 0
             CCGrepState.truncated       = 0
             CCGrepState.max_results     = CCGrepConst.MAX_RESULTS
-            Patterns.count              = 0
+            CCGrep_FreePatterns()
             Patterns.longest            = 0
             Patterns.dfa_ok             = 0
             Patterns.fast_literal_ok    = 0
@@ -1150,6 +1172,26 @@ Function.CCGrep_HandleRequest {
                 }
             } ElseBlock: {
                 // not a directory — treat as single file
+                // If include filter is set, check basename against glob
+                IfCondition NotEqual(GrepConfig.include_pat, 0) ThenBlock: {
+                    // Extract basename from path (scan for last '/')
+                    path_len = StringLength(path)
+                    bname = path
+                    si = Subtract(path_len, 1)
+                    WhileLoop GreaterEqual(si, 0) {
+                        IfCondition EqualTo(GetByte(path, si), 47) ThenBlock: {
+                            bname = Add(path, Add(si, 1))
+                            BreakLoop
+                        }
+                        si = Subtract(si, 1)
+                    }
+                    IfCondition EqualTo(CCGrep_GlobMatch(bname, GrepConfig.include_pat), 0) ThenBlock: {
+                        // File does not match include filter — skip
+                        content = "(no matches — excluded by include filter)"
+                        CCGrep_SendResult(client_fd, id, content, 0)
+                        JSON.Free(parsed)  ReturnValue(0)
+                    }
+                }
                 fd = SystemCall(CCGrepSys.SYS_OPENAT, CCGrepSys.AT_FDCWD, path, 0)
                 IfCondition LessThan(fd, 0) ThenBlock: {
                     CCGrep_SendError(client_fd, id, StringConcat("cannot open: ", path))
@@ -1193,6 +1235,7 @@ SubRoutine.Main {
     // Pre-allocate scratch buffers (reused across requests)
     Scratch.rx    = Allocate(Add(CCGrepConst.LINE_MAX, 1))
     Scratch.rx_lc = Allocate(Add(CCGrepConst.LINE_MAX, 1))
+    Scratch.digits = Allocate(24)
     Scratch.ready = 1
 
     SystemCall(CCGrepSys.SYS_MKDIR, "/tmp/ailang_cctools", 493, 0, 0, 0)
