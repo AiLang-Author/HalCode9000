@@ -139,7 +139,10 @@ Function.Gemini.BuildHeaders {
 
         IfCondition NotEqual(GEMINICfg.auth_mode, 0) ThenBlock: {
             IfCondition EqualTo(StringCompare(GEMINICfg.auth_mode, "oauth"), 0) ThenBlock: {
-                fd = SystemCall(2, "/home/sean/.claudecode/oauth_config.json", 0, 0, 0, 0)
+                ghome = Auth_GetHome()
+                IfCondition EqualTo(ghome, 0) ThenBlock: { ghome = "/root" }
+                oauth_cfg = StringConcat(ghome, "/.claudecode/oauth_config.json")
+                fd = SystemCall(2, oauth_cfg, 0, 0, 0, 0)
                 IfCondition GreaterEqual(fd, 0) ThenBlock: {
                     buf = Allocate(8192)
                     nr = SystemCall(0, fd, buf, 8191, 0, 0)

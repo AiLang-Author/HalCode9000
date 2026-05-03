@@ -562,6 +562,61 @@ Function.Auth.RunOAuthFlow {
 // =============================================================================
 // PUBLIC: RUN FLOW for option 2 (API key from env)
 // =============================================================================
+
+// Read $HOME from /proc/self/environ. Returns 0 if HOME is not set.
+Function.Auth_GetHome {
+    Output: Address
+    Body: {
+        fd = SystemCall(AuthSys.SYS_OPEN, "/proc/self/environ", 0, 0, 0, 0)
+        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
+        buf = Allocate(8192)
+        n = SystemCall(AuthSys.SYS_READ, fd, buf, 8192, 0, 0)
+        SystemCall(3, fd, 0, 0, 0, 0)
+        IfCondition LessEqual(n, 0) ThenBlock: {
+            Deallocate(buf, 8192)
+            ReturnValue(0)
+        }
+        // Scan for HOME=
+        i = 0
+        WhileLoop LessThan(i, n) {
+            IfCondition EqualTo(GetByte(buf, i), 72) ThenBlock: {
+                IfCondition EqualTo(GetByte(buf, Add(i, 1)), 79) ThenBlock: {
+                    IfCondition EqualTo(GetByte(buf, Add(i, 2)), 77) ThenBlock: {
+                        IfCondition EqualTo(GetByte(buf, Add(i, 3)), 69) ThenBlock: {
+                            IfCondition EqualTo(GetByte(buf, Add(i, 4)), 61) ThenBlock: {
+                                val_start = Add(i, 5)
+                                val_end = val_start
+                                WhileLoop LessThan(val_end, n) {
+                                    IfCondition EqualTo(GetByte(buf, val_end), 0) ThenBlock: { BreakLoop }
+                                    val_end = Add(val_end, 1)
+                                }
+                                val_len = Subtract(val_end, val_start)
+                                out = Allocate(Add(val_len, 1))
+                                k = 0
+                                WhileLoop LessThan(k, val_len) {
+                                    SetByte(out, k, GetByte(buf, Add(val_start, k)))
+                                    k = Add(k, 1)
+                                }
+                                SetByte(out, val_len, 0)
+                                Deallocate(buf, 8192)
+                                ReturnValue(out)
+                            }
+                        }
+                    }
+                }
+            }
+            // Skip to next env entry (past null terminator)
+            WhileLoop LessThan(i, n) {
+                IfCondition EqualTo(GetByte(buf, i), 0) ThenBlock: { BreakLoop }
+                i = Add(i, 1)
+            }
+            i = Add(i, 1)
+        }
+        Deallocate(buf, 8192)
+        ReturnValue(0)
+    }
+}
+
 // Read ~/.halcode/<hint>_key (e.g. "deepseek" -> "deepseek_key").
 // Falls back to ~/.halcode/api_key for backward compat when hint is "anthropic".
 // Returns 0 if not found, otherwise heap-allocated null-terminated key string.
@@ -570,8 +625,11 @@ Function.Auth_ReadKeyFile {
     Output: Address
     Body: {
         IfCondition EqualTo(hint, 0) ThenBlock: { ReturnValue(0) }
-        // Build path: /home/sean/.halcode/<hint>_key
-        stem   = StringConcat("/home/sean/.halcode/", hint)
+        // Build path: $HOME/.halcode/<hint>_key
+        home = Auth_GetHome()
+        IfCondition EqualTo(home, 0) ThenBlock: { home = "/root" }
+        haldir = StringConcat(home, "/.halcode/")
+        stem   = StringConcat(haldir, hint)
         path   = StringConcat(stem, "_key")
         fd = SystemCall(AuthSys.SYS_OPEN, path, 0, 0, 0, 0)
         IfCondition LessThan(fd, 0) ThenBlock: {
@@ -580,8 +638,9 @@ Function.Auth_ReadKeyFile {
             path2  = StringConcat(stem2, "_key")
             fd = SystemCall(AuthSys.SYS_OPEN, path2, 0, 0, 0, 0)
             IfCondition LessThan(fd, 0) ThenBlock: {
-                // Legacy fallback: ~/.halcode/api_key (Anthropic-era name)
-                fd = SystemCall(AuthSys.SYS_OPEN, "/home/sean/.halcode/api_key", 0, 0, 0, 0)
+                // Legacy fallback: $HOME/.halcode/api_key
+                legacy = StringConcat(haldir, "api_key")
+                fd = SystemCall(AuthSys.SYS_OPEN, legacy, 0, 0, 0, 0)
                 IfCondition LessThan(fd, 0) ThenBlock: {
                     fd = SystemCall(AuthSys.SYS_OPEN, "/root/.halcode/api_key", 0, 0, 0, 0)
                     IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
