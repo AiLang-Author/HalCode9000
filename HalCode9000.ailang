@@ -45,9 +45,11 @@ FixedPool.CCSys {
     "SYS_KILL":      Initialize=62
     "SYS_CHDIR":     Initialize=80
     "SYS_READLINK":  Initialize=89
+    "SYS_WAIT4":     Initialize=61
     "SYS_PRCTL":     Initialize=157
     "SYS_TIME":      Initialize=201
     "SIGTERM":       Initialize=15
+    "SIGKILL":       Initialize=9
     "PR_SET_PDEATHSIG": Initialize=1
 }
 
@@ -414,6 +416,43 @@ Function.CC_KillAllChildren {
             }
             i = Add(i, 1)
         }
+    }
+}
+
+// Kill any cc_*_ipc.x workers left over from a previous session.
+// PR_SET_PDEATHSIG is unreliable on WSL2 — sockets stay held and the new
+// launch hangs. fork+exec pkill cleans everything up in one shot.
+Function.CC_KillStaleTools {
+    Body: {
+        pkill_path = "/usr/bin/pkill"
+        arg1 = "-9"
+        arg2 = "-f"
+        arg3 = "cc_.*_ipc"
+        argv = Allocate(40)
+        StoreValue(Add(argv, 0),  pkill_path)
+        StoreValue(Add(argv, 8),  arg1)
+        StoreValue(Add(argv, 16), arg2)
+        StoreValue(Add(argv, 24), arg3)
+        StoreValue(Add(argv, 32), 0)
+        pid = SystemCall(CCSys.SYS_FORK, 0, 0, 0, 0, 0)
+        IfCondition EqualTo(pid, 0) ThenBlock: {
+            envp = Allocate(8)
+            StoreValue(envp, 0)
+            SystemCall(CCSys.SYS_EXECVE, pkill_path, argv, envp)
+            SystemCall(CCSys.SYS_EXIT, 0, 0, 0, 0, 0)
+        }
+        IfCondition GreaterThan(pid, 0) ThenBlock: {
+            status = Allocate(8)
+            StoreValue(status, 0)
+            SystemCall(CCSys.SYS_WAIT4, pid, status, 0, 0, 0)
+            Deallocate(status, 8)
+            ts = Allocate(16)
+            StoreValue(Add(ts, 0), 0)
+            StoreValue(Add(ts, 8), 200000000)
+            SystemCall(CCSys.SYS_NANOSLEEP, ts, 0, 0, 0, 0)
+            Deallocate(ts, 16)
+        }
+        Deallocate(argv, 40)
     }
 }
 
@@ -2150,6 +2189,7 @@ SubRoutine.Main {
     CCConst.SYSTEM_PROMPT = "You are HAL Code 9000. Be concise. WSL2 RULES: (1) NEVER use find with / or /mnt or Windows paths. (2) Use Relmem op=symbols to locate files. (3) Scope find to specific subdirectories. (4) Pipe unbounded output through head/grep/tail. (5) NEVER call Relmem op=index on broad paths. (6) Use Pgmem op=\"search\" to extract parked data, DO NOT use op=\"pickup\". (7) Max 25 tool chains in a row, then ask user. (8) NO SUDO. (9) AILang: run `./ailang.x src.ailang dest.x` and `./analyzer.x src.ailang` via Bash to check syntax. (10) VCS: use Olympus tool (init, add, commit, etc). (11) Write tool: use absolute paths. If grandparent missing, use Bash mkdir -p. For files >200 lines, use Bash `cat << 'EOF' > file`. (12) Write tool blocks /etc, /proc, /sys, /dev, /bin, /usr."
 
     CC_ChdirToBinDir()
+    CC_KillStaleTools()
 
     auth_result = CC_RunAuth()
 
