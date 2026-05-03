@@ -78,6 +78,9 @@ FixedPool.UILayout {
     "last_anim_ms":  Initialize=0, CanChange=True
     "reasoning_str": Initialize=0, CanChange=True
     "in_paste":      Initialize=0, CanChange=True
+    "think_start_ms":    Initialize=0, CanChange=True
+    "think_elapsed_sec": Initialize=0, CanChange=True
+    "active_tool":       Initialize=0, CanChange=True
 }
 
 FixedPool.UIGlyph {
@@ -301,6 +304,33 @@ Function.UI_PaintTopRule {
         chars_drawn = 1
         total_target = Subtract(UI_BarWidth(), 1)
         
+        IfCondition And(EqualTo(UILayout.ui_state, 1), EqualTo(UILayout.reasoning_str, 0)) ThenBlock: {
+            // No reasoning stream — show elapsed time in the rule
+            TUI_BufferWriteStr("─[ ")
+            chars_drawn = Add(chars_drawn, 3)
+            TUI_SetFG(UIColors.DIM_FG)
+            esec = UILayout.think_elapsed_sec
+            IfCondition LessThan(esec, 60) ThenBlock: {
+                UI_TUI_WriteInt(esec)
+                TUI_BufferChar(115)  // 's'
+                chars_drawn = Add(chars_drawn, 2)
+                IfCondition GreaterEqual(esec, 10) ThenBlock: { chars_drawn = Add(chars_drawn, 1) }
+            } ElseBlock: {
+                emins = Divide(esec, 60)
+                esecs = Subtract(esec, Multiply(emins, 60))
+                UI_TUI_WriteInt(emins)
+                TUI_BufferChar(109)  // 'm'
+                UI_TUI_WriteInt(esecs)
+                TUI_BufferChar(115)  // 's'
+                chars_drawn = Add(chars_drawn, 4)
+                IfCondition GreaterEqual(emins, 10) ThenBlock: { chars_drawn = Add(chars_drawn, 1) }
+                IfCondition GreaterEqual(esecs, 10) ThenBlock: { chars_drawn = Add(chars_drawn, 1) }
+            }
+            UI_PromptColor()
+            TUI_BufferWriteStr(" ]")
+            chars_drawn = Add(chars_drawn, 2)
+        }
+
         IfCondition And(EqualTo(UILayout.ui_state, 1), NotEqual(UILayout.reasoning_str, 0)) ThenBlock: {
             r_len = StringLength(UILayout.reasoning_str)
             IfCondition GreaterThan(r_len, 0) ThenBlock: {
@@ -404,23 +434,33 @@ Function.UI_PaintHint {
         TUI_BufferChar(27)
         TUI_BufferWriteStr("[K")
 
-        // Calculate right-side length to properly anchor it
-        right_len = 0
-        IfCondition EqualTo(UILayout.show_tools, 1) ThenBlock: {
-            right_len = 22 // "  [Ctrl+O: Hide Tools]"
-        } ElseBlock: {
-            right_len = 24 // "  [Ctrl+O: Expand Tools]"
-        }
+        // -- Right anchor width: "  · ↑N ↓N  [^O]"
+        right_len = 6  // "  [^O]"
         tok_in_len = 1
         _v1 = UILayout.tok_in  WhileLoop GreaterThan(_v1, 9) { _v1 = Divide(_v1, 10)  tok_in_len = Add(tok_in_len, 1) }
         tok_out_len = 1
         _v2 = UILayout.tok_out WhileLoop GreaterThan(_v2, 9) { _v2 = Divide(_v2, 10)  tok_out_len = Add(tok_out_len, 1) }
-        
         IfCondition GreaterThan(UILayout.token_count, 0) ThenBlock: {
-            right_len = Add(right_len, Add(tok_in_len, Add(tok_out_len, 8))) // "  ·  ↑ ↓" is 8 cells
+            right_len = Add(right_len, Add(tok_in_len, Add(tok_out_len, 8)))
         }
 
-        // Blinky Status LEDs
+        // -- Elapsed time width (for avail calculation)
+        elapsed_len = 0
+        IfCondition EqualTo(UILayout.ui_state, 1) ThenBlock: {
+            esec = UILayout.think_elapsed_sec
+            IfCondition LessThan(esec, 60) ThenBlock: {
+                elapsed_len = 3   // "Ns " — min 1-digit + 's' + ' '
+                IfCondition GreaterEqual(esec, 10) ThenBlock: { elapsed_len = 4 }
+            } ElseBlock: {
+                elapsed_len = 5   // "NmNs " base
+                emins = Divide(esec, 60)
+                esecs = Subtract(esec, Multiply(emins, 60))
+                IfCondition GreaterEqual(emins, 10) ThenBlock: { elapsed_len = Add(elapsed_len, 1) }
+                IfCondition GreaterEqual(esecs, 10) ThenBlock: { elapsed_len = Add(elapsed_len, 1) }
+            }
+        }
+
+        // -- Blinky status LEDs
         TUI_BufferWriteStr("  ")
         IfCondition EqualTo(UILayout.ui_state, 1) ThenBlock: {
             m = Modulo(UILayout.mascot_frame, 3)
@@ -431,26 +471,53 @@ Function.UI_PaintHint {
             IfCondition EqualTo(m, 2) ThenBlock: { UI_TUI_FgRGB(100,200,255) } ElseBlock: { UI_TUI_FgRGB(40,80,100) }
             TUI_BufferWriteStr("● ")
         } ElseBlock: {
-            // Idle LEDs
             UI_TUI_FgRGB(80,80,80)
             TUI_BufferWriteStr("● ● ● ")
         }
 
+        // -- Elapsed time (state=1 only)
+        IfCondition EqualTo(UILayout.ui_state, 1) ThenBlock: {
+            TUI_SetFG(UIColors.DIM_FG)
+            esec = UILayout.think_elapsed_sec
+            IfCondition LessThan(esec, 60) ThenBlock: {
+                UI_TUI_WriteInt(esec)
+                TUI_BufferChar(115)  // 's'
+                TUI_BufferChar(32)   // ' '
+            } ElseBlock: {
+                emins = Divide(esec, 60)
+                esecs = Subtract(esec, Multiply(emins, 60))
+                UI_TUI_WriteInt(emins)
+                TUI_BufferChar(109)  // 'm'
+                UI_TUI_WriteInt(esecs)
+                TUI_BufferChar(115)  // 's'
+                TUI_BufferChar(32)   // ' '
+            }
+        }
+
         TUI_SetFG(UIColors.DIM_FG)
         TUI_BufferWriteStr("  ")
-        
-        // Override hint with quote if we are waiting for the model
-        IfCondition And(EqualTo(UILayout.ui_state, 1), NotEqual(UILayout.quote_str, 0)) ThenBlock: {
-            hint = UILayout.quote_str
+
+        // -- Middle content: active tool > quote > default hint
+        display_hint = hint
+        IfCondition EqualTo(UILayout.ui_state, 1) ThenBlock: {
+            IfCondition NotEqual(UILayout.active_tool, 0) ThenBlock: {
+                IfCondition GreaterThan(StringLength(UILayout.active_tool), 0) ThenBlock: {
+                    display_hint = UILayout.active_tool
+                }
+            } ElseBlock: {
+                IfCondition NotEqual(UILayout.quote_str, 0) ThenBlock: {
+                    display_hint = UILayout.quote_str
+                }
+            }
         }
-        
-        IfCondition NotEqual(hint, 0) ThenBlock: {
-            // Available space for the hint is whatever is left before the right anchor
-            avail = Subtract(Subtract(UILayout.cols, right_len), 12) // 12 for LEDs + spacing
+
+        left_fixed = Add(14, elapsed_len)  // 2 + 6 LEDs + 2 sep + elapsed
+        IfCondition NotEqual(display_hint, 0) ThenBlock: {
+            avail = Subtract(Subtract(UILayout.cols, right_len), left_fixed)
             IfCondition LessEqual(avail, 10) ThenBlock: { avail = 10 }
-            hlen = StringLength(hint)
-            
-            IfCondition EqualTo(hint, UILayout.quote_str) ThenBlock: {
+            hlen = StringLength(display_hint)
+
+            IfCondition EqualTo(display_hint, UILayout.quote_str) ThenBlock: {
                 // Marquee scrolling for quotes
                 IfCondition GreaterThan(hlen, avail) ThenBlock: {
                     sep = " *** "
@@ -461,7 +528,7 @@ Function.UI_PaintHint {
                     WhileLoop LessThan(i, avail) {
                         src_idx = Modulo(Add(start_idx, i), wrap_limit)
                         IfCondition LessThan(src_idx, hlen) ThenBlock: {
-                            TUI_BufferChar(GetByte(hint, src_idx))
+                            TUI_BufferChar(GetByte(display_hint, src_idx))
                         } ElseBlock: {
                             gap = Subtract(src_idx, hlen)
                             TUI_BufferChar(GetByte(sep, gap))
@@ -469,38 +536,33 @@ Function.UI_PaintHint {
                         i = Add(i, 1)
                     }
                 } ElseBlock: {
-                    TUI_BufferWriteStr(hint)
+                    TUI_BufferWriteStr(display_hint)
                 }
             } ElseBlock: {
-                // Standard static truncation for normal hints
+                // Static with truncation for tool name / default hint
                 IfCondition GreaterThan(hlen, avail) ThenBlock: {
                     i = 0
                     WhileLoop LessThan(i, Subtract(avail, 3)) {
-                        TUI_BufferChar(GetByte(hint, i))
+                        TUI_BufferChar(GetByte(display_hint, i))
                         i = Add(i, 1)
                     }
                     TUI_BufferWriteStr("...")
                 } ElseBlock: {
-                    TUI_BufferWriteStr(hint)
+                    TUI_BufferWriteStr(display_hint)
                 }
             }
         }
 
-        // Shift left by 1 to prevent printing in the final column of the final row
+        // -- Right anchor: tokens + [^O]
         right_start_col = Subtract(UILayout.cols, right_len)
         TUI_MoveTo(UI_HintRow(), right_start_col)
-
         IfCondition GreaterThan(UILayout.token_count, 0) ThenBlock: {
             TUI_BufferWriteStr("  ·  ↑")
             UI_TUI_WriteInt(UILayout.tok_in)
             TUI_BufferWriteStr(" ↓")
             UI_TUI_WriteInt(UILayout.tok_out)
         }
-        IfCondition EqualTo(UILayout.show_tools, 1) ThenBlock: {
-            TUI_BufferWriteStr("  [Ctrl+O: Hide Tools]")
-        } ElseBlock: {
-            TUI_BufferWriteStr("  [Ctrl+O: Expand Tools]")
-        }
+        TUI_BufferWriteStr("  [^O]")
         TUI_ResetColor()
     }
 }
@@ -805,7 +867,15 @@ Function.UI.SetState {
     Input: state: Integer
     Body: {
         UILayout.ui_state = state
+        IfCondition EqualTo(state, 1) ThenBlock: {
+            UILayout.think_start_ms = UI_GetTimeMs()
+            UILayout.think_elapsed_sec = 0
+        } ElseBlock: {
+            UILayout.active_tool = 0
+        }
+        UI_PaintTopRule()
         UI_PaintBodyRow()
+        UI_PaintHint(UI_GetHintText())
         UI_RenderInput(UILayout.input_len)
         UI.TickMascot()
         TUI_Refresh()
@@ -1046,6 +1116,15 @@ Function.UI.SetTokens {
     }
 }
 
+Function.UI.SetActiveTool {
+    Input: name: Address
+    Body: {
+        UILayout.active_tool = name
+        UI_PaintHint(UI_GetHintText())
+        TUI_Refresh()
+    }
+}
+
 Function.UI.SetQuote {
     Input: q: Address
     Body: {
@@ -1123,12 +1202,20 @@ Function.UI.AnimTick {
         IfCondition GreaterEqual(elapsed, 40) ThenBlock: {
             UILayout.last_anim_ms = ms
             UI.TickMascot()
-            
-            IfCondition And(EqualTo(UILayout.ui_state, 1), NotEqual(UILayout.quote_str, 0)) ThenBlock: {
-                UILayout.quote_offset = Add(UILayout.quote_offset, 1)
+
+            IfCondition EqualTo(UILayout.ui_state, 1) ThenBlock: {
+                // Update elapsed timer every tick
+                diff_ms = Subtract(ms, UILayout.think_start_ms)
+                IfCondition GreaterThan(diff_ms, 0) ThenBlock: {
+                    UILayout.think_elapsed_sec = Divide(diff_ms, 1000)
+                }
+                IfCondition NotEqual(UILayout.quote_str, 0) ThenBlock: {
+                    UILayout.quote_offset = Add(UILayout.quote_offset, 1)
+                }
+                UI_PaintTopRule()
                 UI_PaintHint(UI_GetHintText())
             }
-            
+
             UI_PaintBodyRow()
             UI_RenderInput(UILayout.input_len)
             TUI_Refresh()
@@ -1357,6 +1444,9 @@ Function.UI.ToolCallStart {
     Input: idx: Integer
     Input: total: Integer
     Body: {
+        // Update hint bar with active tool name
+        UILayout.active_tool = tool_name
+
         IfCondition EqualTo(UILayout.show_tools, 0) ThenBlock: {
             // Compact mode: print transient sub-line
             line = StringConcat("  └─ ", tool_name)
@@ -1409,6 +1499,9 @@ Function.UI.ToolCallEnd {
     Input: idx: Integer
     Input: total: Integer
     Body: {
+        // Clear active tool from hint bar; last finished tool clears it
+        UILayout.active_tool = 0
+
         IfCondition EqualTo(UILayout.show_tools, 0) ThenBlock: {
             // Compact mode: erase the transient sub-line
             target_row = Subtract(UILayout.chat_cursor, 1)
