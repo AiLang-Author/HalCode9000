@@ -546,6 +546,62 @@ Function.CCBash_ContainsSudo {
     }
 }
 
+// Strip ANSI/VT escape sequences in-place.
+// Handles CSI (ESC [), OSC (ESC ]), and 2-char sequences (ESC x).
+// Stripped content is always <= original length, so no realloc needed.
+Function.CCBash_StripAnsi {
+    Input: buf: Address
+    Body: {
+        IfCondition EqualTo(buf, 0) ThenBlock: { ReturnValue(0) }
+        slen = StringLength(buf)
+        si = 0
+        di = 0
+        WhileLoop LessThan(si, slen) {
+            ch = GetByte(buf, si)
+            IfCondition EqualTo(ch, 27) ThenBlock: {
+                si = Add(si, 1)
+                IfCondition LessThan(si, slen) ThenBlock: {
+                    next = GetByte(buf, si)
+                    si = Add(si, 1)
+                    IfCondition EqualTo(next, 91) ThenBlock: {
+                        // CSI (ESC [): skip until final byte in 0x40–0x7E
+                        WhileLoop LessThan(si, slen) {
+                            b = GetByte(buf, si)
+                            si = Add(si, 1)
+                            IfCondition And(GreaterEqual(b, 64), LessEqual(b, 126)) ThenBlock: {
+                                BreakLoop
+                            }
+                        }
+                    } ElseBlock: {
+                        IfCondition EqualTo(next, 93) ThenBlock: {
+                            // OSC (ESC ]): skip until BEL (0x07) or ESC '\'
+                            WhileLoop LessThan(si, slen) {
+                                b = GetByte(buf, si)
+                                si = Add(si, 1)
+                                IfCondition EqualTo(b, 7) ThenBlock: { BreakLoop }
+                                IfCondition EqualTo(b, 27) ThenBlock: {
+                                    IfCondition LessThan(si, slen) ThenBlock: {
+                                        IfCondition EqualTo(GetByte(buf, si), 92) ThenBlock: {
+                                            si = Add(si, 1)
+                                        }
+                                    }
+                                    BreakLoop
+                                }
+                            }
+                        }
+                        // Other 2-char sequences: ESC + 1 byte already consumed, done.
+                    }
+                }
+            } ElseBlock: {
+                SetByte(buf, di, ch)
+                di = Add(di, 1)
+                si = Add(si, 1)
+            }
+        }
+        SetByte(buf, di, 0)
+    }
+}
+
 Function.CCBash_SendError {
     Input: client_fd: Integer
     Input: id: Address
@@ -645,6 +701,7 @@ Function.CCBash_HandleRequest {
             trunc_holder = Allocate(8)
             StoreValue(trunc_holder, 0, "dword")
             content = CCBash_Run(cmd, timeout_secs, trunc_holder)
+            IfCondition NotEqual(content, 0) ThenBlock: { CCBash_StripAnsi(content) }
             truncated = Dereference(trunc_holder, "dword")
             Deallocate(trunc_holder, 8)
             IfCondition EqualTo(content, 0) ThenBlock: {

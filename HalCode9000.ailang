@@ -2126,8 +2126,8 @@ SubRoutine.Main {
         SystemCall(CCSys.SYS_EXIT, 0, 0, 0, 0, 0)
     }
 
-    // Splash screen — play a random splash_NN.bgra video from the binary directory.
-    ANSICanvas.PlayRandomSplash(".")
+    // Startup animation — HALCODE assembles from both sides, eye orbits O.
+    UI.StartupAnimation()
 
     // Demo mode: skip auth + tool launches + real API; just render the UI
     // primitives so the operator can eyeball the look. Demo handles its own UI.Init.
