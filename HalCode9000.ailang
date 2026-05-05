@@ -2754,6 +2754,17 @@ Function.CC_RunMCPMode {
 // =============================================================================
 SubRoutine.Main {
 
+    // Ignore SIGPIPE — broken pipe should return EPIPE from write(), not kill us.
+    // Without this, writing to a closed tool socket or dropped API connection
+    // terminates the process immediately.
+    sigact = Allocate(32)
+    StoreValue(Add(sigact, 0), 1)    // sa_handler = SIG_IGN (1)
+    StoreValue(Add(sigact, 8), 0)    // sa_flags = 0
+    StoreValue(Add(sigact, 16), 0)   // sa_restorer = 0
+    StoreValue(Add(sigact, 24), 0)   // sa_mask = 0
+    SystemCall(13, 13, sigact, 0, 8, 0)  // rt_sigaction(SIGPIPE=13, &act, NULL, 8)
+    Deallocate(sigact, 32)
+
     // MCP server mode: ./HalCode9000.x --mcp
     // Boots tools, then speaks JSON-RPC 2.0 over stdio.
     // Stdout is redirected to stderr during boot to keep the MCP stream clean.
