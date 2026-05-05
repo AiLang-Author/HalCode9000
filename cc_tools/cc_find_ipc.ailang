@@ -7,7 +7,7 @@
 // Schema: path (required), name (optional glob), type (optional: f/d),
 //         maxdepth (optional int, default 20), max_results (optional int, default 500)
 //
-// Safety: blocks /, /mnt, /mnt/c (WSL2 hang prevention).
+// Safety: blocks /, /mnt, /mnt/c, /mnt/c/<one component>. Allows /mnt/c/X/Y/... (4+ slashes).
 //
 // Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. SCSL.
 
@@ -35,7 +35,7 @@ FixedPool.CCFindConst {
     "SOCK_PATH":   Initialize="@halcode/Find", CanChange=True
     "BACKLOG":     Initialize=8
     "DIRBUF_SIZE": Initialize=32768
-    "RESULT_CAP":  Initialize=262144
+    "RESULT_CAP":  Initialize=65536
 }
 
 FixedPool.CCFindState {
@@ -279,6 +279,15 @@ Function.CCFind_ProcessDir {
                     SetByte(child, Add(name_off, dname_len), 0)
 
                     is_dir = EqualTo(dtype, CCFindSys.DT_DIR)
+                    // NTFS via WSL2 returns DT_UNKNOWN (0) for all entries — probe with O_DIRECTORY to detect dirs.
+                    IfCondition EqualTo(dtype, 0) ThenBlock: {
+                        probe_flags = BitwiseOr(CCFindSys.O_RDONLY, CCFindSys.O_DIRECTORY)
+                        probe_fd = SystemCall(CCFindSys.SYS_OPENAT, CCFindSys.AT_FDCWD, child, probe_flags, 0, 0)
+                        IfCondition GreaterEqual(probe_fd, 0) ThenBlock: {
+                            is_dir = 1
+                            SystemCall(CCFindSys.SYS_CLOSE, probe_fd, 0, 0, 0, 0)
+                        }
+                    }
 
                     IfCondition EqualTo(CCFind_ShouldPrint(child, is_dir), 1) ThenBlock: {
                         CCFind_AppendStr(child)
@@ -312,10 +321,21 @@ Function.CCFind_IsDangerousPath {
     Body: {
         IfCondition EqualTo(StringCompare(path, "/"), 0) ThenBlock: { ReturnValue(1) }
         IfCondition EqualTo(StringCompare(path, "/mnt"), 0) ThenBlock: { ReturnValue(1) }
-        // /mnt/c or /mnt/c/...
+        // Block /mnt/c exactly and /mnt/c/<single component> (e.g. /mnt/c/Users, /mnt/c/Windows).
+        // Allow /mnt/c/<X>/<Y>/... (4+ slashes total) — covers the actual project path.
         IfCondition EqualTo(MemCompare(path, "/mnt/c", 6), 0) ThenBlock: {
             nc = GetByte(path, 6)
-            IfCondition Or(EqualTo(nc, 0), EqualTo(nc, 47)) ThenBlock: { ReturnValue(1) }
+            IfCondition Or(EqualTo(nc, 0), EqualTo(nc, 47)) ThenBlock: {
+                slash_count = 0
+                ci = 0
+                WhileLoop NotEqual(GetByte(path, ci), 0) {
+                    IfCondition EqualTo(GetByte(path, ci), 47) ThenBlock: {
+                        slash_count = Add(slash_count, 1)
+                    }
+                    ci = Add(ci, 1)
+                }
+                IfCondition LessEqual(slash_count, 3) ThenBlock: { ReturnValue(1) }
+            }
         }
         ReturnValue(0)
     }
@@ -421,7 +441,7 @@ Function.CCFind_HandleRequest {
                 JSON.Free(parsed)  ReturnValue(0)
             }
             IfCondition EqualTo(CCFind_IsDangerousPath(path), 1) ThenBlock: {
-                CCFind_SendError(client_fd, id, "Blocked: searching /, /mnt, or /mnt/c causes permanent hangs on WSL2. Use a scoped path.")
+                CCFind_SendError(client_fd, id, "Blocked: path too broad — use at least /mnt/c/<user>/<subdir> (e.g. /mnt/c/Users/Sean/Documents/AILangSH) to avoid WSL2 NTFS hangs.")
                 JSON.Free(parsed)  ReturnValue(0)
             }
 
@@ -457,10 +477,8 @@ Function.CCFind_HandleRequest {
             // Run search
             CCFind_ProcessDir(path, 0)
 
-            // NUL-terminate result
-            IfCondition LessThan(CCFindState.result_pos, CCFindConst.RESULT_CAP) ThenBlock: {
-                SetByte(CCFindState.result_buf, CCFindState.result_pos, 0)
-            }
+            // NUL-terminate result (RESULT_CAP+1 allocated so this is always safe)
+            SetByte(CCFindState.result_buf, CCFindState.result_pos, 0)
 
             content = CCFindState.result_buf
             IfCondition EqualTo(CCFindState.result_count, 0) ThenBlock: {
@@ -480,7 +498,7 @@ SubRoutine.Main {
     CCFindConst.SOCK_PATH = "@halcode/Find"
     CCFindState.schema    = CCFind_BuildSchema()
 
-    CCFindState.result_buf = Allocate(CCFindConst.RESULT_CAP)
+    CCFindState.result_buf = Allocate(Add(CCFindConst.RESULT_CAP, 1))
 
     SystemCall(CCFindSys.SYS_MKDIR, "/tmp/ailang_cctools", 493, 0, 0, 0)
     SystemCall(CCFindSys.SYS_UNLINK, CCFindConst.SOCK_PATH, 0, 0, 0, 0)

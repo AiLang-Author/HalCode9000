@@ -23,7 +23,7 @@ LibraryImport.JSON
 LibraryImport.StringUtils
 
 FixedPool.IPCDConst {
-    "MAX_TOOLS":     Initialize=16
+    "TABLE_CAP":     Initialize=2048  // 64 slots × 32 bytes — no enforced ceiling
     "ENTRY_SIZE":    Initialize=32    // 8 name + 8 fd + 8 schema + 8 sock_path
 }
 
@@ -45,9 +45,8 @@ FixedPool.IPCDState {
 // =============================================================================
 Function.IPCDispatch.Init {
     Body: {
-        sz = Multiply(IPCDConst.MAX_TOOLS, IPCDConst.ENTRY_SIZE)
-        IPCDState.table = Allocate(sz)
-        MemorySet(IPCDState.table, 0, sz)
+        IPCDState.table = Allocate(IPCDConst.TABLE_CAP)
+        MemorySet(IPCDState.table, 0, IPCDConst.TABLE_CAP)
         IPCDState.count = 0
         IPCDState.schemas_arr = JSON.NewArray()
     }
@@ -93,11 +92,6 @@ Function.IPCDispatch.RegisterTool {
         IPCD_Log("[ipcd] BEGIN ")
         IPCD_Log(name)
         IPCD_Log("\n")
-
-        IfCondition GreaterEqual(IPCDState.count, IPCDConst.MAX_TOOLS) ThenBlock: {
-            IPCD_Log("[ipcd] FAIL table_full\n")
-            ReturnValue(0)
-        }
 
         fd = Socket.Create(1, 1)
         IfCondition LessThan(fd, 0) ThenBlock: {

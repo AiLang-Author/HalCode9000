@@ -49,6 +49,8 @@ FixedPool.CCSys {
     "SYS_WAIT4":     Initialize=61
     "SYS_PRCTL":     Initialize=157
     "SYS_TIME":      Initialize=201
+    "SYS_RENAME":    Initialize=82
+    "SYS_UNLINK":    Initialize=87
     "SIGTERM":       Initialize=15
     "SIGKILL":       Initialize=9
     "PR_SET_PDEATHSIG": Initialize=1
@@ -57,6 +59,7 @@ FixedPool.CCSys {
 FixedPool.CCConst {
     "MODEL":          Initialize=0, CanChange=True
     "SYSTEM_PROMPT":  Initialize=0, CanChange=True
+    "PROJ_PROMPT":    Initialize=0, CanChange=True
     "INPUT_BUF_SZ":   Initialize=1048576      // 1MB
     "LINE_BUF_SZ":    Initialize=1048576      // 1MB - prevents Buffer Bound overflows
     "SSE_STATE_SZ":   Initialize=88
@@ -71,6 +74,9 @@ FixedPool.CCRunState {
     "child_pids":    Initialize=0, CanChange=True
     "child_count":   Initialize=0, CanChange=True
     "auto_approve":  Initialize=0, CanChange=True
+    "session_turn":  Initialize=0, CanChange=True
+    "auth_mode":     Initialize=0, CanChange=True
+    "auth_cred":     Initialize=0, CanChange=True
 }
 
 FixedPool.QuoteState {
@@ -196,6 +202,26 @@ Function.CC_SleepMs {
     }
 }
 
+// Full-jitter helper: returns a random ms value in [0, max_ms].
+// Uses 2 bytes from /dev/urandom for 16-bit entropy.
+Function.CC_RandomMs {
+    Input: max_ms: Integer
+    Output: Integer
+    Body: {
+        IfCondition LessEqual(max_ms, 0) ThenBlock: { ReturnValue(0) }
+        fd = SystemCall(CCSys.SYS_OPEN, "/dev/urandom", 0, 0, 0, 0)
+        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(Divide(max_ms, 2)) }
+        buf = Allocate(2)
+        SystemCall(CCSys.SYS_READ, fd, buf, 2, 0, 0)
+        SystemCall(CCSys.SYS_CLOSE, fd, 0, 0, 0, 0)
+        lo = GetByte(buf, 0)
+        hi = GetByte(buf, 1)
+        Deallocate(buf, 2)
+        rnd = BitwiseOr(lo, LeftShift(hi, 8))
+        ReturnValue(Divide(Multiply(rnd, max_ms), 65535))
+    }
+}
+
 // Verbose debug logger. Appends to /tmp/hal9000_debug.log
 Function.CC_DebugLog {
     Input: msg: Address
@@ -206,6 +232,27 @@ Function.CC_DebugLog {
             SystemCall(CCSys.SYS_WRITE, fd, msg, StringLength(msg), 0, 0)
             SystemCall(CCSys.SYS_CLOSE, fd, 0, 0, 0, 0)
         }
+    }
+}
+
+// Check for agent completion flag written by cc_agent_ipc daemon worker.
+// Non-blocking: open returns -1 immediately if file absent.
+Function.CC_CheckAgentNotify {
+    Body: {
+        fd = SystemCall(CCSys.SYS_OPEN, "/tmp/hal_agent_notify.txt", 0, 0, 0, 0)
+        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
+        buf = Allocate(256)
+        n = SystemCall(CCSys.SYS_READ, fd, buf, 255, 0, 0)
+        SystemCall(CCSys.SYS_CLOSE, fd, 0, 0, 0, 0)
+        SystemCall(CCSys.SYS_UNLINK, "/tmp/hal_agent_notify.txt", 0, 0, 0, 0)
+        IfCondition GreaterThan(n, 0) ThenBlock: {
+            SetByte(buf, n, 0)
+            IfCondition EqualTo(GetByte(buf, Subtract(n, 1)), 10) ThenBlock: {
+                SetByte(buf, Subtract(n, 1), 0)
+            }
+            UI.ChatTag("◆", buf, 6)
+        }
+        Deallocate(buf, 256)
     }
 }
 
@@ -238,6 +285,160 @@ Function.CC_TurnLog {
     }
 }
 
+
+// =============================================================================
+// SESSION LOG — /tmp/hal_session.txt
+// Comprehensive per-turn record: user input, full COT, full response.
+// =============================================================================
+
+// Append a labeled section to the session log.
+Function.CC_SessionLog {
+    Input: label: Address
+    Input: content: Address
+    Body: {
+        fd = SystemCall(CCSys.SYS_OPEN, "/tmp/hal_session.txt", 1089, 420, 0, 0)
+        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
+        IfCondition NotEqual(label, 0) ThenBlock: {
+            SystemCall(CCSys.SYS_WRITE, fd, label, StringLength(label), 0, 0)
+        }
+        IfCondition NotEqual(content, 0) ThenBlock: {
+            clen = StringLength(content)
+            IfCondition GreaterThan(clen, 0) ThenBlock: {
+                SystemCall(CCSys.SYS_WRITE, fd, content, clen, 0, 0)
+            }
+        }
+        SystemCall(CCSys.SYS_WRITE, fd, "\n", 1, 0, 0)
+        SystemCall(CCSys.SYS_CLOSE, fd, 0, 0, 0, 0)
+    }
+}
+
+// Write the turn header + user message to the session log.
+Function.CC_SessionLogUser {
+    Input: user_msg: Address
+    Body: {
+        CCRunState.session_turn = Add(CCRunState.session_turn, 1)
+        hdr = StringConcat("=== TURN ", NumberToString(CCRunState.session_turn))
+        hdr = StringConcat(hdr, " ===\n[USER]\n")
+        CC_SessionLog(hdr, user_msg)
+        CC_SessionLog("[/USER]\n", 0)
+    }
+}
+
+// Write COT + response sections to the session log (call before Backend.Reset).
+Function.CC_SessionLogResponse {
+    Body: {
+        cot = Backend.GetReasoning()
+        resp = Backend.GetResponseText()
+        IfCondition NotEqual(cot, 0) ThenBlock: {
+            IfCondition GreaterThan(StringLength(cot), 0) ThenBlock: {
+                CC_SessionLog("[THINKING]\n", cot)
+                CC_SessionLog("[/THINKING]\n", 0)
+            }
+        }
+        IfCondition NotEqual(resp, 0) ThenBlock: {
+            CC_SessionLog("[RESPONSE]\n", resp)
+            CC_SessionLog("[/RESPONSE]\n", 0)
+        }
+    }
+}
+
+// Called at exit. If /tmp/hal_session.txt exists, ask user to keep (timestamped)
+// or delete it. Runs after UI.Shutdown so terminal is back in cooked mode.
+Function.CC_SessionCleanup {
+    Body: {
+        fd = SystemCall(CCSys.SYS_OPEN, "/tmp/hal_session.txt", 0, 0, 0, 0)
+        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
+        SystemCall(CCSys.SYS_CLOSE, fd, 0, 0, 0, 0)
+
+        CC_WriteStdout("\nSession log: /tmp/hal_session.txt\nKeep it? [y/N] ")
+        kbuf = Allocate(8)
+        CC_ReadStdinLine(kbuf, 8)
+        ch = GetByte(kbuf, 0)
+        Deallocate(kbuf, 8)
+
+        IfCondition Or(EqualTo(ch, 121), EqualTo(ch, 89)) ThenBlock: {
+            ts = SystemCall(CCSys.SYS_TIME, 0, 0, 0, 0, 0)
+            newpath = StringConcat("/tmp/hal_session_", NumberToString(ts))
+            newpath = StringConcat(newpath, ".txt")
+            SystemCall(CCSys.SYS_RENAME, "/tmp/hal_session.txt", newpath, 0, 0, 0)
+            CC_WriteStdout("Saved to: ")
+            CC_WriteStdout(newpath)
+            CC_WriteStdout("\n")
+        } ElseBlock: {
+            SystemCall(CCSys.SYS_UNLINK, "/tmp/hal_session.txt", 0, 0, 0, 0)
+        }
+    }
+}
+
+// =============================================================================
+// =============================================================================
+// PROJECT PROMPT — load/build/apply per-project system prompt addon
+// =============================================================================
+
+// Fetch the project prompt from pgmem key __prompt__. Returns text or 0.
+Function.CC_LoadProjectPrompt {
+    Output: Address
+    Body: {
+        args = JSON.NewObject()
+        JSON.SetString(args, "op", "pickup")
+        JSON.SetString(args, "key", "__prompt__")
+        perr = Allocate(8)
+        StoreValue(perr, 0, "dword")
+        result = IPCDispatch.Dispatch("Pgmem", args, 0, perr)
+        err_flag = Dereference(perr, "dword")
+        Deallocate(perr, 8)
+        IfCondition EqualTo(err_flag, 1) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(result, 0) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(StringLength(result), 0) ThenBlock: { ReturnValue(0) }
+        ReturnValue(result)
+    }
+}
+
+// Build the combined system prompt (base rules + project addon if set).
+Function.CC_BuildFullPrompt {
+    Output: Address
+    Body: {
+        IfCondition EqualTo(CCConst.PROJ_PROMPT, 0) ThenBlock: {
+            ReturnValue(CCConst.SYSTEM_PROMPT)
+        }
+        full = StringConcat(CCConst.SYSTEM_PROMPT, "\n\nPROJECT PROMPT:\n")
+        full = StringConcat(full, CCConst.PROJ_PROMPT)
+        ReturnValue(full)
+    }
+}
+
+// Re-initialize backend with current combined prompt. Clears history.
+// Call UI.Shutdown/Init/SessionHeader in the caller after this.
+Function.CC_ApplyProjectPrompt {
+    Body: {
+        History.Init()
+        Backend.Init(CCRunState.auth_mode, CCRunState.auth_cred, CC_BuildFullPrompt())
+    }
+}
+
+// =============================================================================
+// PROJECT COMMAND — /project slash command handler
+// =============================================================================
+// Calls project.info on pgmem and prints the human-readable content field.
+Function.CC_ProjectCommand {
+    Body: {
+        args = JSON.NewObject()
+        JSON.SetString(args, "op", "project.info")
+        perr = Allocate(8)
+        StoreValue(perr, 0, "dword")
+        resp = IPCDispatch.Dispatch("Pgmem", args, 0, perr)
+        err_flag = Dereference(perr, "dword")
+        Deallocate(perr, 8)
+        IfCondition EqualTo(err_flag, 1) ThenBlock: {
+            UI.ChatTag("✗", "Pgmem unavailable — start cc_pgmem_ipc.x first.", 1)
+            ReturnValue(0)
+        }
+        IfCondition NotEqual(resp, 0) ThenBlock: {
+            UI.ChatPrintln(resp)
+        }
+        UI.ChatPrintln("  project.list | project.create name=<n> | project.select name=<n> | project.layout")
+    }
+}
 
 // =============================================================================
 // PATH HELPERS — expand "~/..." to "$HOME/..."
@@ -644,7 +845,7 @@ Function.CC_RunTurn {
             chain_count = Add(chain_count, 1)
 
             // --- Retry Loop for API calls ---
-            max_retries = 3
+            max_retries = 30
             retry_count = 0
             request_ok = 0
             retry_delay_ms = 2000
@@ -725,8 +926,9 @@ Function.CC_RunTurn {
             IfCondition EqualTo(handle, 0) ThenBlock: {
                 CC_DebugLog("HTTP.PostStream FAILED (curl spawn error).\n")
                 UI.ChatTag("✗", "HTTP request failed (curl spawn)", 1)
-                CC_SleepMs(retry_delay_ms)
+                CC_SleepMs(CC_RandomMs(retry_delay_ms))
                 retry_delay_ms = Multiply(retry_delay_ms, 2)
+                IfCondition GreaterThan(retry_delay_ms, 30000) ThenBlock: { retry_delay_ms = 30000 }
                 retry_count = Add(retry_count, 1)
                 ContinueLoop
             }
@@ -860,8 +1062,9 @@ Function.CC_RunTurn {
                 CC_DebugLog("\n")
                 retry_count = Add(retry_count, 1)
                 IfCondition LessThan(retry_count, max_retries) ThenBlock: {
-                    CC_SleepMs(retry_delay_ms)
+                    CC_SleepMs(CC_RandomMs(retry_delay_ms))
                     retry_delay_ms = Multiply(retry_delay_ms, 2)
+                    IfCondition GreaterThan(retry_delay_ms, 30000) ThenBlock: { retry_delay_ms = 30000 }
                     Backend.Reset()
                     UI.SetReasoning("")
                 }
@@ -874,11 +1077,15 @@ Function.CC_RunTurn {
 
             UI.SetState(2)
             UI.ChatPrintln("")
+            IfCondition EqualTo(request_ok, 0) ThenBlock: {
+                UI.ChatTag("✗", "All retries exhausted. Any completed tool work is in /tmp/hal_turn_log.txt", 1)
+            }
 
             // Only commit to history and dispatch tools if the final request was successful
             IfCondition EqualTo(request_ok, 1) ThenBlock: {
                 CC_DebugLog("Committing assistant message to history.\n")
                 Backend.CommitAssistantToHistory()
+                CC_SessionLogResponse()
                 Backend.PrintUsage()
 
                 // Pending tools?
@@ -1608,58 +1815,89 @@ Function.CC_RegisterOneTool {
     }
 }
 
+// Reads cc_tools.json and launches / registers every tool listed in it.
+// do_launch=1: fork+exec each binary (pass 1) then connect+register (pass 2).
+// do_launch=0: connect+register only — used by agent workers where the daemons
+//              are already running (launched by the parent process).
+// buf is intentionally NOT freed — JSON stores raw string pointers into it.
+Function.CC_LoadManifest {
+    Input: path: Address
+    Input: do_launch: Integer
+    Output: Integer
+    Body: {
+        fd = SystemCall(CCSys.SYS_OPEN, path, 0, 0, 0, 0)
+        IfCondition LessThan(fd, 0) ThenBlock: {
+            CC_WriteStdout("[tools] WARN: cc_tools.json not found\n")
+            ReturnValue(0)
+        }
+        buf = Allocate(32768)
+        n = SystemCall(CCSys.SYS_READ, fd, buf, 32767, 0, 0)
+        SystemCall(CCSys.SYS_CLOSE, fd, 0, 0, 0, 0)
+        IfCondition LessEqual(n, 0) ThenBlock: {
+            Deallocate(buf, 32768)
+            ReturnValue(0)
+        }
+        SetByte(buf, n, 0)
+        parsed = ParseJSON(buf)
+        IfCondition EqualTo(parsed, 0) ThenBlock: {
+            CC_WriteStdout("[tools] WARN: cc_tools.json parse failed\n")
+            ReturnValue(0)
+        }
+        obj = JSON.AsObject(parsed)
+        IfCondition EqualTo(obj, 0) ThenBlock: { ReturnValue(0) }
+        tools_arr = JSON.GetArray(obj, "tools")
+        IfCondition EqualTo(tools_arr, 0) ThenBlock: {
+            CC_WriteStdout("[tools] WARN: no 'tools' array in cc_tools.json\n")
+            ReturnValue(0)
+        }
+        count = JSON.ArrayLength(tools_arr)
+
+        // Pass 1 (launch mode only): fork+exec all binaries so they bind in parallel.
+        IfCondition EqualTo(do_launch, 1) ThenBlock: {
+            j = 0
+            WhileLoop LessThan(j, count) {
+                et = JSON.ArrayGet(tools_arr, j)
+                eo = JSON.AsObject(et)
+                IfCondition NotEqual(eo, 0) ThenBlock: {
+                    bin = JSON.GetString(eo, "binary")
+                    IfCondition NotEqual(bin, 0) ThenBlock: {
+                        CC_LaunchTool(bin)
+                    }
+                }
+                j = Add(j, 1)
+            }
+        }
+
+        // Pass 2: connect to each socket, fetch schema, register in dispatch table.
+        i = 0
+        WhileLoop LessThan(i, count) {
+            et = JSON.ArrayGet(tools_arr, i)
+            eo = JSON.AsObject(et)
+            IfCondition NotEqual(eo, 0) ThenBlock: {
+                tool_name   = JSON.GetString(eo, "name")
+                tool_socket = JSON.GetString(eo, "socket")
+                IfCondition And(NotEqual(tool_name, 0), NotEqual(tool_socket, 0)) ThenBlock: {
+                    IfCondition EqualTo(do_launch, 1) ThenBlock: {
+                        CC_RegisterOneTool(tool_name, tool_socket)
+                    } ElseBlock: {
+                        IPCDispatch.RegisterTool(tool_name, tool_socket)
+                    }
+                }
+            }
+            i = Add(i, 1)
+        }
+        ReturnValue(count)
+    }
+}
+
 Function.CC_BootTools {
     Body: {
-        // Allocate child PID table
         CCRunState.child_pids = Allocate(Multiply(CCConst.MAX_CHILDREN, 8))
         CCRunState.child_count = 0
 
-        CC_WriteStdout(" Launching tool services...\n")
+        CC_WriteStdout(" Loading tools from cc_tools.json...\n")
+        CC_LoadManifest("./cc_tools.json", 1)
 
-        // Phase 1 tool table — paths are RELATIVE to CWD when HalCode9000.x runs.
-        // (Phase 2: replace with cc_tools.json config-file driven registration.)
-        CC_LaunchTool("./cc_read_ipc.x")
-        CC_LaunchTool("./cc_head_ipc.x")
-        CC_LaunchTool("./cc_ls_ipc.x")
-        CC_LaunchTool("./cc_write_ipc.x")
-        CC_LaunchTool("./cc_bash_ipc.x")
-        CC_LaunchTool("./cc_webfetch_ipc.x")
-        CC_LaunchTool("./cc_relmem_ipc.x")
-        CC_LaunchTool("./cc_pgmem_ipc.x")
-        CC_LaunchTool("./cc_agent_ipc.x")
-        CC_LaunchTool("./cc_edit_ipc.x")
-        CC_LaunchTool("./cc_find_ipc.x")
-        CC_LaunchTool("./cc_grep_ipc.x")
-        CC_LaunchTool("./cc_git_ipc.x")
-        CC_LaunchTool("./cc_js_ipc.x")
-        CC_LaunchTool("./cc_mcp_ipc.x")
-        // CC_LaunchTool("./cc_olympus_ipc.x")    // stub source is empty, not yet built
-
-        // Wait for sockets to bind
-        // CC_SleepShort() // Disabled in favor of robust retry logic in IPCDispatch
-
-        // Abstract Unix sockets (kernel namespace, no filesystem inode).
-        // Bypasses WSL2 tmpfs bug that produces malformed socket inodes
-        // when the binary lives on /mnt/c (drvfs-resident).
-        CC_WriteStdout(" Registering tool services...\n")
-        CC_RegisterOneTool("Read",     "@halcode/Read")
-        CC_RegisterOneTool("Head",     "@halcode/Head")
-        CC_RegisterOneTool("LS",       "@halcode/LS")
-        CC_RegisterOneTool("Write",    "@halcode/Write")
-        CC_RegisterOneTool("Bash",     "@halcode/Bash")
-        CC_RegisterOneTool("WebFetch", "@halcode/WebFetch")
-        CC_RegisterOneTool("Relmem",   "@halcode/Relmem")
-        CC_RegisterOneTool("Pgmem",    "@halcode/Pgmem")
-        CC_RegisterOneTool("Agent",    "@halcode/Agent")
-        CC_RegisterOneTool("Edit",     "@halcode/Edit")
-        CC_RegisterOneTool("Find",     "@halcode/Find")
-        CC_RegisterOneTool("Grep",     "@halcode/Grep")
-        CC_RegisterOneTool("Git",      "@halcode/Git")
-        CC_RegisterOneTool("JS",       "@halcode/JS")
-        CC_RegisterOneTool("MCP",      "@halcode/MCP")
-        // CC_RegisterOneTool("Olympus",  "@halcode/Olympus")  // not yet built
-
-        // Load intrusive thoughts quotes (best-effort — missing file is not fatal)
         CC_LoadQuotes("./intrusivethoughts.json")
     }
 }
@@ -1672,6 +1910,7 @@ Function.CC_ChatLoop {
         paste_used = 0
 
         WhileLoop EqualTo(CCRunState.running, 1) {
+            CC_CheckAgentNotify()
             line = UI.ReadLine()
             n = StringLength(line)
 
@@ -1730,7 +1969,12 @@ Function.CC_ChatLoop {
             }
 
             IfCondition And(EqualTo(paste_active, 0), GreaterThan(paste_used, 0)) ThenBlock: {
-                SetByte(paste_buf, paste_used, 0) History.AppendUser(paste_buf) paste_used = 0 CC_RunTurn() ContinueLoop
+                SetByte(paste_buf, paste_used, 0)
+                CC_SessionLogUser(paste_buf)
+                History.AppendUser(paste_buf)
+                paste_used = 0
+                CC_RunTurn()
+                ContinueLoop
             }
 
             IfCondition And(EqualTo(paste_active, 0), GreaterEqual(n, 0)) ThenBlock: {
@@ -1769,6 +2013,86 @@ Function.CC_ChatLoop {
                         CCRunState.auto_approve = 0
                         UI.ChatTag("✓", "Autonomous mode OFF — will pause after 25 tool calls.", 3)
                     }
+                }
+                // /project — show current project info
+                IfCondition EqualTo(StringCompare(line, "/project"), 0) ThenBlock: {
+                    CC_ProjectCommand()
+                }
+                // /sysprompt — show/set/clear/apply the per-project system prompt addon
+                IfCondition EqualTo(StringCompare(line, "/sysprompt"), 0) ThenBlock: {
+                    proj = CC_LoadProjectPrompt()
+                    IfCondition EqualTo(proj, 0) ThenBlock: {
+                        UI.ChatPrintln("No project prompt set.")
+                    } ElseBlock: {
+                        UI.ChatPrintln(StringConcat("Project prompt:\n", proj))
+                    }
+                    UI.ChatPrintln("  /sysprompt set <text>  — save and apply inline")
+                    UI.ChatPrintln("  /sysprompt clear       — remove project prompt")
+                    UI.ChatPrintln("  /sysprompt apply       — reload from pgmem (e.g. after external edit)")
+                }
+                IfCondition EqualTo(StringCompare(line, "/sysprompt clear"), 0) ThenBlock: {
+                    clr_args = JSON.NewObject()
+                    JSON.SetString(clr_args, "op", "park")
+                    JSON.SetString(clr_args, "key", "__prompt__")
+                    JSON.SetString(clr_args, "kind", "config")
+                    JSON.SetString(clr_args, "content", "")
+                    JSON.SetString(clr_args, "scope", "global")
+                    clr_perr = Allocate(8)
+                    StoreValue(clr_perr, 0, "dword")
+                    IPCDispatch.Dispatch("Pgmem", clr_args, 0, clr_perr)
+                    Deallocate(clr_perr, 8)
+                    CCConst.PROJ_PROMPT = 0
+                    CC_ApplyProjectPrompt()
+                    UI.Shutdown()
+                    UI.Init()
+                    UI.SessionHeader(0, 0, 0)
+                    UI.ChatTag("✓", "Project prompt cleared. History reset.", 2)
+                }
+                IfCondition EqualTo(StringCompare(line, "/sysprompt apply"), 0) ThenBlock: {
+                    CCConst.PROJ_PROMPT = CC_LoadProjectPrompt()
+                    CC_ApplyProjectPrompt()
+                    UI.Shutdown()
+                    UI.Init()
+                    UI.SessionHeader(0, 0, 0)
+                    IfCondition NotEqual(CCConst.PROJ_PROMPT, 0) ThenBlock: {
+                        UI.ChatTag("✓", "Project prompt reloaded. History reset.", 2)
+                    } ElseBlock: {
+                        UI.ChatTag("✓", "No project prompt in pgmem. History reset.", 3)
+                    }
+                }
+                IfCondition GreaterThan(StringLength(line), 15) ThenBlock: {
+                    sp_pfx = Allocate(16)
+                    sp_k = 0
+                    WhileLoop LessThan(sp_k, 15) {
+                        SetByte(sp_pfx, sp_k, GetByte(line, sp_k))
+                        sp_k = Add(sp_k, 1)
+                    }
+                    SetByte(sp_pfx, 15, 0)
+                    IfCondition EqualTo(StringCompare(sp_pfx, "/sysprompt set "), 0) ThenBlock: {
+                        prompt_text = Add(line, 15)
+                        sp_args = JSON.NewObject()
+                        JSON.SetString(sp_args, "op", "park")
+                        JSON.SetString(sp_args, "key", "__prompt__")
+                        JSON.SetString(sp_args, "kind", "config")
+                        JSON.SetString(sp_args, "content", prompt_text)
+                        JSON.SetString(sp_args, "scope", "global")
+                        sp_perr = Allocate(8)
+                        StoreValue(sp_perr, 0, "dword")
+                        IPCDispatch.Dispatch("Pgmem", sp_args, 0, sp_perr)
+                        sp_err = Dereference(sp_perr, "dword")
+                        Deallocate(sp_perr, 8)
+                        IfCondition EqualTo(sp_err, 1) ThenBlock: {
+                            UI.ChatTag("✗", "Failed to save — is pgmem running?", 1)
+                        } ElseBlock: {
+                            CCConst.PROJ_PROMPT = prompt_text
+                            CC_ApplyProjectPrompt()
+                            UI.Shutdown()
+                            UI.Init()
+                            UI.SessionHeader(0, 0, 0)
+                            UI.ChatTag("✓", "Project prompt saved and applied. History reset.", 2)
+                        }
+                    }
+                    Deallocate(sp_pfx, 16)
                 }
                 // /model [name] — show or switch model
                 IfCondition EqualTo(StringCompare(line, "/model"), 0) ThenBlock: {
@@ -1841,6 +2165,7 @@ Function.CC_ChatLoop {
                 IfCondition GreaterThan(n, 0) ThenBlock: {
                     first = GetByte(line, 0)
                     IfCondition NotEqual(first, 47) ThenBlock: {   // not '/'
+                        CC_SessionLogUser(line)
                         History.AppendUser(line)
                         CC_RunTurn()
                     }
@@ -2083,6 +2408,14 @@ Function.CC_SetupAgentProvider {
                 SelectedProvider.default_model = model_override
             }
         }
+        // Fall back to key file if env var not set
+        IfCondition EqualTo(cred, 0) ThenBlock: {
+            auth_res = Auth.RunAPIKeyFlow(0, SelectedProvider.key_hint)
+            auth_status = JSON.GetString(auth_res, "status")
+            IfCondition EqualTo(StringCompare(auth_status, "ok"), 0) ThenBlock: {
+                cred = JSON.GetString(auth_res, "credential")
+            }
+        }
         IfCondition EqualTo(cred, 0) ThenBlock: { cred = "" }
         ReturnValue(cred)
     }
@@ -2094,21 +2427,21 @@ Function.CC_RegisterToolsOnly {
     Body: {
         CCRunState.child_pids = Allocate(Multiply(CCConst.MAX_CHILDREN, 8))
         CCRunState.child_count = 0
-        IPCDispatch.RegisterTool("Read",     "@halcode/Read")
-        IPCDispatch.RegisterTool("Head",     "@halcode/Head")
-        IPCDispatch.RegisterTool("LS",       "@halcode/LS")
-        IPCDispatch.RegisterTool("Write",    "@halcode/Write")
-        IPCDispatch.RegisterTool("Bash",     "@halcode/Bash")
-        IPCDispatch.RegisterTool("WebFetch", "@halcode/WebFetch")
-        IPCDispatch.RegisterTool("Relmem",   "@halcode/Relmem")
-        IPCDispatch.RegisterTool("Pgmem",    "@halcode/Pgmem")
-        IPCDispatch.RegisterTool("Agent",    "@halcode/Agent")
-        IPCDispatch.RegisterTool("Edit",     "@halcode/Edit")
-        IPCDispatch.RegisterTool("Find",     "@halcode/Find")
-        IPCDispatch.RegisterTool("Grep",     "@halcode/Grep")
-        IPCDispatch.RegisterTool("Git",      "@halcode/Git")
-        IPCDispatch.RegisterTool("JS",       "@halcode/JS")
-        IPCDispatch.RegisterTool("MCP",      "@halcode/MCP")
+        CC_LoadManifest("./cc_tools.json", 0)
+    }
+}
+
+// Write a debug line to stderr (fd 2). In agent mode stderr → log file via 2>>.
+Function.CC_AgentLog {
+    Input: msg: Address
+    Body: {
+        IfCondition EqualTo(msg, 0) ThenBlock: { ReturnValue(0) }
+        alen = StringLength(msg)
+        SystemCall(CCSys.SYS_WRITE, 2, msg, alen, 0, 0)
+        anl = Allocate(4)
+        SetByte(anl, 0, 10) SetByte(anl, 1, 0)
+        SystemCall(CCSys.SYS_WRITE, 2, anl, 1, 0, 0)
+        Deallocate(anl, 4)
     }
 }
 
@@ -2118,6 +2451,7 @@ Function.CC_RegisterToolsOnly {
 Function.CC_RunAgentMode {
     Input: prompt: Address
     Body: {
+        CC_AgentLog("[worker] CC_RunAgentMode starting")
         CCRunState.auto_approve = 1
 
         // Redirect stdout → /dev/null so all TUI/ANSI output is discarded
@@ -2128,9 +2462,13 @@ Function.CC_RunAgentMode {
             SystemCall(CCSys.SYS_CLOSE, devnull, 0, 0, 0, 0)
         }
 
+        CC_AgentLog("[worker] UI.Init")
         UI.Init()
+        CC_AgentLog("[worker] appending prompt to history")
         History.AppendUser(prompt)
+        CC_AgentLog("[worker] CC_RunTurn starting")
         CC_RunTurn()
+        CC_AgentLog("[worker] CC_RunTurn complete")
         UI.Shutdown()
 
         // Restore stdout before writing result
@@ -2161,8 +2499,10 @@ Function.CC_RunAgentMode {
             i = Subtract(i, 1)
         }
 
+        CC_AgentLog(StringConcat("[worker] result chars=", NumberToString(StringLength(result))))
         CC_WriteStdout(result)
         CC_WriteStdout("\n")
+        CC_AgentLog("[worker] done")
     }
 }
 
@@ -2451,17 +2791,28 @@ SubRoutine.Main {
     // Must be detected before the splash so nothing writes to stdout.
     agent_spec = CC_ReadArgValue("--agent")
     IfCondition NotEqual(agent_spec, 0) ThenBlock: {
+        CC_AgentLog("[init] agent mode detected")
         prompt_buf = Allocate(CCConst.INPUT_BUF_SZ)
+        CC_AgentLog("[init] reading stdin")
         n_read = CC_ReadStdinAll(prompt_buf, CCConst.INPUT_BUF_SZ)
+        CC_AgentLog(StringConcat("[init] stdin bytes=", NumberToString(n_read)))
         IfCondition LessEqual(n_read, 0) ThenBlock: {
+            CC_AgentLog("[init] empty stdin — exiting")
             SystemCall(CCSys.SYS_EXIT, 1, 0, 0, 0, 0)
         }
+        CC_AgentLog("[init] CC_SetupAgentProvider")
         cred = CC_SetupAgentProvider(agent_spec)
-        CCConst.SYSTEM_PROMPT = "You are HAL Code 9000. Be concise. WSL2 RULES: (1) NEVER use find with / or /mnt or Windows paths. (2) Use Relmem op=symbols to locate files. (3) Scope find to specific subdirectories. (4) Pipe unbounded output through head/grep/tail. (5) NEVER call Relmem op=index on broad paths. (6) Use Pgmem op=\"search\" to extract parked data, DO NOT use op=\"pickup\". (7) Max 25 tool chains in a row, then ask user. (8) NO SUDO. (9) AILang: run `./ailang.x src.ailang dest.x` and `./analyzer.x src.ailang` via Bash to check syntax. (10) VCS: use Olympus tool (init, add, commit, etc). (11) Write tool: use absolute paths. If grandparent missing, use Bash mkdir -p. For files >200 lines, use Bash `cat << 'EOF' > file`. (12) Write tool blocks /etc, /proc, /sys, /dev, /bin, /usr."
+        CC_AgentLog("[init] SYSTEM_PROMPT assign")
+        CCConst.SYSTEM_PROMPT = "You are HAL Code 9000. Be concise. WSL2 RULES: (1) NEVER use find with / or /mnt or Windows paths. (2) Use Relmem op=symbols to locate files. (3) Scope find to specific subdirectories. (4) Pipe unbounded output through head/grep/tail. (5) NEVER call Relmem op=index on broad paths. (6) Use Pgmem op=\"search\" to extract parked data, DO NOT use op=\"pickup\". (7) Max 25 tool chains in a row, then ask user. (8) BLOCKED COMMANDS: sudo, rm, mv, dd, kill, killall, pkill, crontab, and piping to sh/bash are all forbidden. (9) AILang: run `./ailang.x src.ailang dest.x` and `./analyzer.x src.ailang` via Bash to check syntax. (10) VCS: use Olympus tool (snapshot, review, log, info, init) for compound workflows; use Git tool for raw git subcommands. (11) Write tool: use absolute paths. If grandparent missing, use Bash mkdir -p. For files >200 lines, use Bash `cat << 'EOF' > file`. (12) Write tool blocks /etc, /proc, /sys, /dev, /bin, /usr. (13) NO UNSOLICITED EDITS: never modify files unless explicitly asked — read-only exploration (Read, Head, Grep, Find, Stat, Wc, Du, Diff, LS, Git) is always OK without asking. (14) TOOL ERRORS: recheck your own parameters first — most errors are bad inputs not broken tools; retry with corrected params before reporting the tool as broken. (15) GREP: when path is a directory you MUST pass recursive=1; the include glob (e.g. *.ailang) only applies in recursive mode. (16) AGENT: always pass task_id (use the pgmem task ID from op=task_create) so the daemon can call task_end and mark the task complete; omitting task_id leaves the task stuck in pending forever. (17) AGENT WAITING: after spawning agents call `Sleep seconds=90` (the Sleep tool) then check Pgmem ONCE per wait cycle — NEVER use Bash sleep or poll Pgmem in a loop; the Sleep tool is the ONLY safe wait mechanism because it does not touch Pgmem; Pgmem is single-threaded and each pickup call holds the socket, blocking the agent daemon from parking its result and calling task_end, which causes a deadlock that kills the agent with a timeout."
+        CC_AgentLog("[init] History.Init")
         History.Init()
+        CC_AgentLog("[init] IPCDispatch.Init")
         IPCDispatch.Init()
+        CC_AgentLog("[init] Backend.Init")
         Backend.Init("apikey", cred, CCConst.SYSTEM_PROMPT)
+        CC_AgentLog("[init] CC_RegisterToolsOnly")
         CC_RegisterToolsOnly()
+        CC_AgentLog("[init] CC_RunAgentMode")
         CC_RunAgentMode(prompt_buf)
         SystemCall(CCSys.SYS_EXIT, 0, 0, 0, 0, 0)
     }
@@ -2487,7 +2838,7 @@ SubRoutine.Main {
     // Tool registration logs print via PrintMessage; both happen before
     // we grab the screen.
 
-    CCConst.SYSTEM_PROMPT = "You are HAL Code 9000. Be concise. WSL2 RULES: (1) NEVER use find with / or /mnt or Windows paths. (2) Use Relmem op=symbols to locate files. (3) Scope find to specific subdirectories. (4) Pipe unbounded output through head/grep/tail. (5) NEVER call Relmem op=index on broad paths. (6) Use Pgmem op=\"search\" to extract parked data, DO NOT use op=\"pickup\". (7) Max 25 tool chains in a row, then ask user. (8) NO SUDO. (9) AILang: run `./ailang.x src.ailang dest.x` and `./analyzer.x src.ailang` via Bash to check syntax. (10) VCS: use Olympus tool (init, add, commit, etc). (11) Write tool: use absolute paths. If grandparent missing, use Bash mkdir -p. For files >200 lines, use Bash `cat << 'EOF' > file`. (12) Write tool blocks /etc, /proc, /sys, /dev, /bin, /usr."
+    CCConst.SYSTEM_PROMPT = "You are HAL Code 9000. Be concise. WSL2 RULES: (1) NEVER use find with / or /mnt or Windows paths. (2) Use Relmem op=symbols to locate files. (3) Scope find to specific subdirectories. (4) Pipe unbounded output through head/grep/tail. (5) NEVER call Relmem op=index on broad paths. (6) Use Pgmem op=\"search\" to extract parked data, DO NOT use op=\"pickup\". (7) Max 25 tool chains in a row, then ask user. (8) BLOCKED COMMANDS: sudo, rm, mv, dd, kill, killall, pkill, crontab, and piping to sh/bash are all forbidden. (9) AILang: run `./ailang.x src.ailang dest.x` and `./analyzer.x src.ailang` via Bash to check syntax. (10) VCS: use Olympus tool (snapshot, review, log, info, init) for compound workflows; use Git tool for raw git subcommands. (11) Write tool: use absolute paths. If grandparent missing, use Bash mkdir -p. For files >200 lines, use Bash `cat << 'EOF' > file`. (12) Write tool blocks /etc, /proc, /sys, /dev, /bin, /usr. (13) NO UNSOLICITED EDITS: never modify files unless explicitly asked — read-only exploration (Read, Head, Grep, Find, Stat, Wc, Du, Diff, LS, Git) is always OK without asking. (14) TOOL ERRORS: recheck your own parameters first — most errors are bad inputs not broken tools; retry with corrected params before reporting the tool as broken. (15) GREP: when path is a directory you MUST pass recursive=1; the include glob (e.g. *.ailang) only applies in recursive mode. (16) AGENT: always pass task_id (use the pgmem task ID from op=task_create) so the daemon can call task_end and mark the task complete; omitting task_id leaves the task stuck in pending forever. (17) AGENT WAITING: after spawning agents call `Sleep seconds=90` (the Sleep tool) then check Pgmem ONCE per wait cycle — NEVER use Bash sleep or poll Pgmem in a loop; the Sleep tool is the ONLY safe wait mechanism because it does not touch Pgmem; Pgmem is single-threaded and each pickup call holds the socket, blocking the agent daemon from parking its result and calling task_end, which causes a deadlock that kills the agent with a timeout."
 
     CC_ChdirToBinDir()
     CC_KillStaleTools()
@@ -2507,9 +2858,12 @@ SubRoutine.Main {
         IfCondition NotEqual(auth_result, 0) ThenBlock: {
             auth_mode_str = JSON.GetString(auth_result, "mode")
             credential = JSON.GetString(auth_result, "credential")
+            CCRunState.auth_mode = auth_mode_str
+            CCRunState.auth_cred = credential
 
+            CCConst.PROJ_PROMPT = CC_LoadProjectPrompt()
             History.Init()
-            Backend.Init(auth_mode_str, credential, CCConst.SYSTEM_PROMPT)
+            Backend.Init(auth_mode_str, credential, CC_BuildFullPrompt())
 
             // Now grab the terminal — auth is done, no more cooked-mode prints.
             UI.Init()
@@ -2534,6 +2888,7 @@ SubRoutine.Main {
         }
     }
 
+    CC_SessionCleanup()
     IPCDispatch.Shutdown()
     CC_KillAllChildren()
     SystemCall(CCSys.SYS_EXIT, 0, 0, 0, 0, 0)

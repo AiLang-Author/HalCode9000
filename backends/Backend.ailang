@@ -282,6 +282,29 @@ Function.Backend.IsCleanStop {
 }
 
 // =============================================================================
+// BUFFER ACCESSORS — valid between CommitAssistantToHistory and Reset
+// =============================================================================
+Function.Backend.GetReasoning {
+    Output: Address
+    Body: {
+        IfCondition EqualTo(BackendState.kind, BackendKind.OPENAI) ThenBlock: {
+            ReturnValue(OpenAI.GetReasoning())
+        }
+        ReturnValue(0)
+    }
+}
+
+Function.Backend.GetResponseText {
+    Output: Address
+    Body: {
+        IfCondition EqualTo(BackendState.kind, BackendKind.OPENAI) ThenBlock: {
+            ReturnValue(OpenAI.GetResponseText())
+        }
+        ReturnValue(0)
+    }
+}
+
+// =============================================================================
 // RESET
 // =============================================================================
 Function.Backend.Reset {

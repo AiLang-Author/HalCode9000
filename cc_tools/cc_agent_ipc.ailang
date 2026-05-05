@@ -139,6 +139,26 @@ Function.Agent_CallPgmem {
     }
 }
 
+// Append a timestamped line to /tmp/hal_agent_<task_id>.log.
+// O_WRONLY|O_CREAT|O_APPEND = 1|64|1024 = 1089, mode 0644 = 420
+Function.Agent_LogMsg {
+    Input: log_path: Address
+    Input: msg: Address
+    Body: {
+        IfCondition EqualTo(log_path, 0) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(msg, 0) ThenBlock: { ReturnValue(0) }
+        lfd = SystemCall(AgentSys.SYS_OPEN, log_path, 1089, 420, 0, 0)
+        IfCondition LessThan(lfd, 0) ThenBlock: { ReturnValue(0) }
+        llen = StringLength(msg)
+        SystemCall(AgentSys.SYS_WRITE, lfd, msg, llen, 0, 0)
+        nl = Allocate(4)
+        SetByte(nl, 0, 10) SetByte(nl, 1, 0)
+        SystemCall(AgentSys.SYS_WRITE, lfd, nl, 1, 0, 0)
+        Deallocate(nl, 4)
+        SystemCall(AgentSys.SYS_CLOSE, lfd, 0, 0, 0, 0)
+    }
+}
+
 Function.Agent_HandleRequest {
     Input: client_fd: Integer
     Input: req_str: Address
@@ -176,6 +196,14 @@ Function.Agent_HandleRequest {
                 }
                 
                 // Background Worker (Daemon)
+                Arena_Init()
+                log_path = StringConcat("/tmp/hal_agent_", t_id)
+                log_path = StringConcat(log_path, ".log")
+                Agent_LogMsg(log_path, "[daemon] started")
+                Agent_LogMsg(log_path, StringConcat("[daemon] task_id=", t_id))
+                Agent_LogMsg(log_path, StringConcat("[daemon] context_key=", c_key))
+                Agent_LogMsg(log_path, StringConcat("[daemon] result_key=", r_key))
+
                 c_data = ""
                 IfCondition NotEqual(c_key, 0) ThenBlock: {
                     pg_req = JSON.NewObject()
@@ -202,48 +230,58 @@ Function.Agent_HandleRequest {
                 in_path = StringConcat(in_path, ".txt")
                 out_path = StringConcat("/tmp/agent_out_", t_id)
                 out_path = StringConcat(out_path, ".txt")
-                
+
+                Agent_LogMsg(log_path, StringConcat("[daemon] writing input to ", in_path))
                 fd = SystemCall(AgentSys.SYS_OPEN, in_path, 577, 384, 0, 0) // O_WRONLY|O_CREAT|O_TRUNC, 0600
                 IfCondition GreaterEqual(fd, 0) ThenBlock: {
                     SystemCall(AgentSys.SYS_WRITE, fd, in_content, StringLength(in_content), 0, 0)
                     SystemCall(AgentSys.SYS_CLOSE, fd, 0, 0, 0, 0)
                 }
-                
+
                 SystemCall(AgentSys.SYS_UNLINK, out_path, 0, 0, 0, 0)
                 envp = Agent_BuildInheritedEnvp()
-                
+
+                Agent_LogMsg(log_path, "[daemon] spawning HalCode9000.x worker")
                 cpid = SystemCall(AgentSys.SYS_FORK, 0, 0, 0, 0, 0)
                 IfCondition EqualTo(cpid, 0) ThenBlock: {
                     argv = Allocate(32)
                     StoreValue(Add(argv, 0), "/bin/sh")
                     StoreValue(Add(argv, 8), "-c")
-                    cmd = "./HalCode9000.x --agent deepseek < "
+                    cmd = "timeout 300 ./HalCode9000.x --agent deepseek < "
                     cmd = StringConcat(cmd, in_path)
                     cmd = StringConcat(cmd, " > ")
                     cmd = StringConcat(cmd, out_path)
-                    cmd = StringConcat(cmd, " 2>&1")
+                    cmd = StringConcat(cmd, " 2>>")
+                    cmd = StringConcat(cmd, log_path)
                     StoreValue(Add(argv, 16), cmd)
                     StoreValue(Add(argv, 24), 0)
                     SystemCall(AgentSys.SYS_EXECVE, "/bin/sh", argv, envp)
                     SystemCall(AgentSys.SYS_EXIT, 1, 0, 0, 0, 0)
                 }
-                
+
                 status_ptr2 = Allocate(8)
                 SystemCall(AgentSys.SYS_WAIT4, cpid, status_ptr2, 0, 0, 0)
+                raw_status2 = Dereference(status_ptr2, "dword")
+                exit_code2 = Modulo(Divide(raw_status2, 256), 256)
                 Deallocate(status_ptr2, 8)
-                
+                Agent_LogMsg(log_path, StringConcat("[daemon] worker exited, code=", NumberToString(exit_code2)))
+
                 out_content = "[Error: Sub-agent execution failed]"
                 out_fd = SystemCall(AgentSys.SYS_OPEN, out_path, 0, 0, 0, 0)
                 IfCondition GreaterEqual(out_fd, 0) ThenBlock: {
                     buf = Allocate(1048576)
                     n = SystemCall(AgentSys.SYS_READ, out_fd, buf, 1048575, 0, 0)
                     SystemCall(AgentSys.SYS_CLOSE, out_fd, 0, 0, 0, 0)
+                    Agent_LogMsg(log_path, StringConcat("[daemon] output bytes=", NumberToString(n)))
                     IfCondition GreaterThan(n, 0) ThenBlock: {
                         SetByte(buf, n, 0)
                         out_content = buf
                     }
+                } ElseBlock: {
+                    Agent_LogMsg(log_path, "[daemon] output file not found or empty")
                 }
 
+                Agent_LogMsg(log_path, StringConcat("[daemon] parking to pgmem key=", r_key))
                 park_req = JSON.NewObject()
                 JSON.SetString(park_req, "op", "park")
                 JSON.SetString(park_req, "key", r_key)
@@ -251,19 +289,33 @@ Function.Agent_HandleRequest {
                 JSON.SetString(park_req, "content", out_content)
                 JSON.SetString(park_req, "scope", "project")
                 Agent_CallPgmem(park_req)
+                Agent_LogMsg(log_path, "[daemon] park sent")
+
+                // Write flag file so HalCode9000 main loop can show a notification.
+                notify_fd = SystemCall(AgentSys.SYS_OPEN, "/tmp/hal_agent_notify.txt", 577, 420, 0, 0)
+                IfCondition GreaterEqual(notify_fd, 0) ThenBlock: {
+                    notify_msg = StringConcat("Agent parked: ", r_key)
+                    notify_msg = StringConcat(notify_msg, "\n")
+                    SystemCall(AgentSys.SYS_WRITE, notify_fd, notify_msg, StringLength(notify_msg), 0, 0)
+                    SystemCall(AgentSys.SYS_CLOSE, notify_fd, 0, 0, 0, 0)
+                }
+
                 IfCondition GreaterEqual(out_fd, 0) ThenBlock: {
                     Deallocate(buf, 1048576)
                 }
                 
                 IfCondition NotEqual(StringCompare(t_id, "unknown"), 0) ThenBlock: {
+                    Agent_LogMsg(log_path, "[daemon] calling task_end")
                     end_req = JSON.NewObject()
                     JSON.SetString(end_req, "op", "task_end")
                     JSON.SetString(end_req, "task_id", t_id)
                     JSON.SetString(end_req, "status", "complete")
                     JSON.SetString(end_req, "result_key", r_key)
                     Agent_CallPgmem(end_req)
+                    Agent_LogMsg(log_path, "[daemon] task_end sent")
                 }
-                
+
+                Agent_LogMsg(log_path, "[daemon] done, cleaning up")
                 SystemCall(AgentSys.SYS_UNLINK, in_path, 0, 0, 0, 0)
                 SystemCall(AgentSys.SYS_UNLINK, out_path, 0, 0, 0, 0)
                 SystemCall(AgentSys.SYS_EXIT, 0, 0, 0, 0, 0)
@@ -273,7 +325,11 @@ Function.Agent_HandleRequest {
             SystemCall(AgentSys.SYS_WAIT4, pid, status_ptr, 0, 0, 0)
             Deallocate(status_ptr, 8)
             
+            log_reply = StringConcat("/tmp/hal_agent_", t_id)
+            log_reply = StringConcat(log_reply, ".log")
             reply = StringConcat("Worker spawned asynchronously. Result will be parked in Pgmem under key: ", r_key)
+            reply = StringConcat(reply, " | Log: ")
+            reply = StringConcat(reply, log_reply)
             Agent_SendResult(client_fd, id, reply)
             ReturnValue(1)
         }

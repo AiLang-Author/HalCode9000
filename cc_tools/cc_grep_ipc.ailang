@@ -39,7 +39,7 @@ FixedPool.CCGrepConst {
     "MAX_PATTERNS": Initialize=256
     "BUF_SIZE":     Initialize=1048576
     "LINE_MAX":     Initialize=4096
-    "RESULT_CAP":   Initialize=524288
+    "RESULT_CAP":   Initialize=65536
     "MAX_RESULTS":  Initialize=200
     "DIRBUF_SIZE":  Initialize=32768
     "MAX_DEPTH":    Initialize=20
@@ -985,7 +985,7 @@ Function.CCGrep_BuildSchema {
         s = UtilArgs_NewSchema("Grep", "Search for a pattern in files using BM/NFA/DFA engine. Returns matching lines with optional context.")
         UtilArgs_AddField(s, "pattern",     "string", 1, "Pattern to search (regex by default; set fixed=1 for literal)", "pattern")
         UtilArgs_AddField(s, "path",        "path",   1, "File or directory path to search", "path")
-        UtilArgs_AddField(s, "context",     "int",    0, "Lines of context around each match (default 2)", "context")
+        UtilArgs_AddField(s, "context",     "int",    0, "Lines of context around each match (default 0)", "context")
         UtilArgs_AddField(s, "recursive",   "int",    0, "1 = recurse into subdirectories", "recursive")
         UtilArgs_AddField(s, "fixed",       "int",    0, "1 = treat pattern as literal string (no regex)", "fixed")
         UtilArgs_AddField(s, "ignore_case", "int",    0, "1 = case-insensitive match", "ignore_case")
@@ -994,7 +994,7 @@ Function.CCGrep_BuildSchema {
         UtilArgs_AddField(s, "invert",      "int",    0, "1 = return non-matching lines (-v)", "invert")
         UtilArgs_AddField(s, "word_match",  "int",    0, "1 = match whole words only (-w)", "word_match")
         UtilArgs_AddField(s, "whole_line",  "int",    0, "1 = match whole line only (-x)", "whole_line")
-        UtilArgs_SetDefault(s, "context",     "2")
+        UtilArgs_SetDefault(s, "context",     "0")
         UtilArgs_SetDefault(s, "recursive",   "0")
         UtilArgs_SetDefault(s, "fixed",       "0")
         UtilArgs_SetDefault(s, "ignore_case", "0")
@@ -1146,6 +1146,11 @@ Function.CCGrep_HandleRequest {
             IfCondition NotEqual(rec_str, 0) ThenBlock: {
                 IfCondition EqualTo(StringToInt(rec_str), 1) ThenBlock: { GrepConfig.recursive = 1 }
             }
+            // Fallback: model may send recursive as a JSON integer/bool rather than a string.
+            // UtilArgs_GetString returns null for non-string JSON values and falls back to default "0".
+            IfCondition EqualTo(GrepConfig.recursive, 0) ThenBlock: {
+                IfCondition EqualTo(JSON.GetBool(args, "recursive"), 1) ThenBlock: { GrepConfig.recursive = 1 }
+            }
             inc_str = UtilArgs_GetString(validated, "include")
             IfCondition NotEqual(inc_str, 0) ThenBlock: { GrepConfig.include_pat = inc_str }
             mr_str = UtilArgs_GetString(validated, "max_results")
@@ -1202,10 +1207,8 @@ Function.CCGrep_HandleRequest {
                 SystemCall(CCGrepSys.SYS_CLOSE, fd, 0, 0, 0, 0)
             }
 
-            // NUL-terminate result
-            IfCondition LessThan(CCGrepState.result_pos, CCGrepConst.RESULT_CAP) ThenBlock: {
-                SetByte(CCGrepState.result_buf, CCGrepState.result_pos, 0)
-            }
+            // NUL-terminate result — always safe: allocated RESULT_CAP+1 bytes
+            SetByte(CCGrepState.result_buf, CCGrepState.result_pos, 0)
 
             content = CCGrepState.result_buf
             IfCondition EqualTo(CCGrepState.match_count, 0) ThenBlock: { content = "(no matches)" }
@@ -1224,7 +1227,7 @@ SubRoutine.Main {
     CCGrepState.schema    = CCGrep_BuildSchema()
 
     // Pre-allocate long-lived buffers
-    CCGrepState.result_buf = Allocate(CCGrepConst.RESULT_CAP)
+    CCGrepState.result_buf = Allocate(Add(CCGrepConst.RESULT_CAP, 1))
     CCGrepCtx.ring_slots   = Allocate(Multiply(CCGrepConst.MAX_CTX, CCGrepConst.LINE_SLOT))
     CCGrepCtx.ring_lens    = Allocate(Multiply(CCGrepConst.MAX_CTX, 8))
     CCGrepCtx.ring_nos     = Allocate(Multiply(CCGrepConst.MAX_CTX, 8))

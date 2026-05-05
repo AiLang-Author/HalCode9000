@@ -26,7 +26,7 @@ FixedPool.OAISignal {
 }
 
 FixedPool.OAIConst {
-    "TEXT_BUF_SZ":          Initialize=262144
+    "TEXT_BUF_SZ":          Initialize=524288
     "ARGS_BUF_SZ":          Initialize=262144
     "MAX_TOOLS":            Initialize=16
     "API_HOST":             Initialize="api.openai.com", CanChange=True
@@ -45,8 +45,10 @@ FixedPool.OAICfg {
 FixedPool.OAIState {
     "text_buf":             Initialize=0, CanChange=True
     "text_used":            Initialize=0, CanChange=True
-    "reasoning_buf":        Initialize=0, CanChange=True   // DeepSeek thinking content
+    "reasoning_buf":        Initialize=0, CanChange=True   // current turn COT (streaming in)
     "reasoning_used":       Initialize=0, CanChange=True
+    "reasoning_prev_buf":   Initialize=0, CanChange=True   // previous turn COT (sent in history)
+    "reasoning_prev_used":  Initialize=0, CanChange=True
     "tool_slots":           Initialize=0, CanChange=True
     "tool_count":           Initialize=0, CanChange=True
     "has_tools_flag":       Initialize=0, CanChange=True
@@ -68,9 +70,12 @@ Function.OpenAI.Init {
         OAICfg.model = model
         OAICfg.system_prompt = system_prompt
 
-        OAIState.text_buf     = Allocate(OAIConst.TEXT_BUF_SZ)
-        OAIState.reasoning_buf = Allocate(OAIConst.TEXT_BUF_SZ)
-        OAIState.tool_slots   = Allocate(Multiply(OAIConst.MAX_TOOLS, 32))
+        OAIState.text_buf          = Allocate(OAIConst.TEXT_BUF_SZ)
+        OAIState.reasoning_buf     = Allocate(OAIConst.TEXT_BUF_SZ)
+        OAIState.reasoning_prev_buf = Allocate(OAIConst.TEXT_BUF_SZ)
+        SetByte(OAIState.reasoning_prev_buf, 0, 0)
+        OAIState.reasoning_prev_used = 0
+        OAIState.tool_slots        = Allocate(Multiply(OAIConst.MAX_TOOLS, 32))
 
         i = 0
         WhileLoop LessThan(i, OAIConst.MAX_TOOLS) {
@@ -507,9 +512,10 @@ Function.OpenAI_BuildAssistantMsgStr {
         s = StringConcat(s, esc_content)
         s = StringConcat(s, "\"")
 
-        // ,"reasoning_content":"<esc>"
-        IfCondition GreaterThan(OAIState.reasoning_used, 0) ThenBlock: {
-            esc_rc = JSON.EscapeString(OAIState.reasoning_buf)
+        // Ping-pong: echo the PREVIOUS turn's COT, not the current one.
+        // reasoning_prev_buf is set in CommitAssistantToHistory after each successful turn.
+        IfCondition GreaterThan(OAIState.reasoning_prev_used, 0) ThenBlock: {
+            esc_rc = JSON.EscapeString(OAIState.reasoning_prev_buf)
             s = StringConcat(s, ",\"reasoning_content\":\"")
             s = StringConcat(s, esc_rc)
             s = StringConcat(s, "\"")
@@ -561,7 +567,22 @@ Function.OpenAI.CommitAssistantToHistory {
         IfCondition NotEqual(msg, 0) ThenBlock: {
             History.AppendRaw(msg)
         }
+        // Ping-pong swap: current COT becomes prev for the next turn's history entry.
+        cur_used = OAIState.reasoning_used
+        MemoryCopy(OAIState.reasoning_prev_buf, OAIState.reasoning_buf, cur_used)
+        SetByte(OAIState.reasoning_prev_buf, cur_used, 0)
+        OAIState.reasoning_prev_used = cur_used
     }
+}
+
+Function.OpenAI.GetReasoning {
+    Output: Address
+    Body: { ReturnValue(OAIState.reasoning_buf) }
+}
+
+Function.OpenAI.GetResponseText {
+    Output: Address
+    Body: { ReturnValue(OAIState.text_buf) }
 }
 
 Function.OpenAI.AppendToolResultsToHistory {

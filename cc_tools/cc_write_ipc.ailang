@@ -1,8 +1,8 @@
 // cc_write_ipc.ailang — Claude Code Write tool, IPC service.
 //
-// Writes (or appends) string content to a file. Creates parent file
-// if missing. No directory creation — caller specifies a path that
-// already lives in an existing directory.
+// Writes (or appends) string content to a file. Auto-creates the file
+// and its immediate parent directory if missing (one level only — not
+// recursive like mkdir -p). Paths with 2+ levels of missing dirs fail.
 //
 // Schema: path (required string), content (required string), append (bool, default false).
 //

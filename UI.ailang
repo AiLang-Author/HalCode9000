@@ -81,6 +81,9 @@ FixedPool.UILayout {
     "think_start_ms":    Initialize=0, CanChange=True
     "think_elapsed_sec": Initialize=0, CanChange=True
     "active_tool":       Initialize=0, CanChange=True
+    "input_len_cached":  Initialize=0, CanChange=True  // cache key: last computed len
+    "input_cols_cached": Initialize=0, CanChange=True  // cache key: cols at compute time
+    "input_lines_cached":Initialize=1, CanChange=True  // cached result
 }
 
 FixedPool.UIGlyph {
@@ -774,6 +777,9 @@ Function.UI_CalcInputLines {
     Input: len: Integer
     Output: Integer
     Body: {
+        IfCondition And(EqualTo(len, UILayout.input_len_cached), EqualTo(UILayout.cols, UILayout.input_cols_cached)) ThenBlock: {
+            ReturnValue(UILayout.input_lines_cached)
+        }
         start_col = 12
         w = Subtract(UILayout.cols, start_col)
         IfCondition LessEqual(w, 0) ThenBlock: { w = 10 }
@@ -795,6 +801,9 @@ Function.UI_CalcInputLines {
             i = Add(i, 1)
         }
         IfCondition LessThan(lines, 1) ThenBlock: { lines = 1 }
+        UILayout.input_len_cached = len
+        UILayout.input_cols_cached = UILayout.cols
+        UILayout.input_lines_cached = lines
         ReturnValue(lines)
     }
 }

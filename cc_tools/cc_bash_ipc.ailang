@@ -438,37 +438,213 @@ Function.CCBash_IsRmSystemRoot {
 
 // Returns 1 if cmd contains "rm " followed (eventually) by a system path like / /etc /bin etc.
 // Scans for "rm " then looks for space-prefixed "/" tokens within the rest of the command.
-Function.CCBash_IsDangerousRm {
+// Returns 1 if cmd contains "rm" as a command word (word-boundary aware).
+// Matches: rm, rm -rf, ls && rm, ; rm, etc.
+// Does NOT match: grep -rm, chmod +r, trim, etc.
+Function.CCBash_ContainsRm {
     Input: cmd: Address
     Output: Integer
     Body: {
         IfCondition EqualTo(cmd, 0) ThenBlock: { ReturnValue(0) }
         len = StringLength(cmd)
-        IfCondition LessThan(len, 4) ThenBlock: { ReturnValue(0) }
+        IfCondition LessThan(len, 2) ThenBlock: { ReturnValue(0) }
         i = 0
-        limit = Subtract(len, 3)
+        limit = Subtract(len, 2)
         WhileLoop LessEqual(i, limit) {
-            // Look for "rm" followed by space or tab
             IfCondition EqualTo(GetByte(cmd, i), 114) ThenBlock: {           // 'r'
                 IfCondition EqualTo(GetByte(cmd, Add(i, 1)), 109) ThenBlock: { // 'm'
-                    sep = GetByte(cmd, Add(i, 2))
-                    IfCondition Or(EqualTo(sep, 32), EqualTo(sep, 9)) ThenBlock: {
-                        // Scan forward for slash tokens (preceded by space/tab or at start)
-                        j = Add(i, 3)
-                        WhileLoop LessThan(j, len) {
-                            IfCondition EqualTo(GetByte(cmd, j), 47) ThenBlock: {  // '/'
-                                before = GetByte(cmd, Subtract(j, 1))
-                                IfCondition Or(EqualTo(before, 32), EqualTo(before, 9)) ThenBlock: {
-                                    c_after = 0
-                                    IfCondition LessThan(Add(j, 1), len) ThenBlock: {
-                                        c_after = GetByte(cmd, Add(j, 1))
-                                    }
-                                    IfCondition EqualTo(CCBash_IsRmSystemRoot(c_after), 1) ThenBlock: {
-                                        ReturnValue(1)
+                    before_ok = 0
+                    IfCondition EqualTo(i, 0) ThenBlock: { before_ok = 1 }
+                    IfCondition GreaterThan(i, 0) ThenBlock: {
+                        bp = GetByte(cmd, Subtract(i, 1))
+                        IfCondition EqualTo(bp, 32)  ThenBlock: { before_ok = 1 }  // space
+                        IfCondition EqualTo(bp, 9)   ThenBlock: { before_ok = 1 }  // tab
+                        IfCondition EqualTo(bp, 10)  ThenBlock: { before_ok = 1 }  // newline
+                        IfCondition EqualTo(bp, 59)  ThenBlock: { before_ok = 1 }  // ;
+                        IfCondition EqualTo(bp, 124) ThenBlock: { before_ok = 1 }  // |
+                        IfCondition EqualTo(bp, 38)  ThenBlock: { before_ok = 1 }  // &
+                        IfCondition EqualTo(bp, 40)  ThenBlock: { before_ok = 1 }  // (
+                    }
+                    IfCondition EqualTo(before_ok, 1) ThenBlock: {
+                        after_ok = 0
+                        next_pos = Add(i, 2)
+                        IfCondition GreaterEqual(next_pos, len) ThenBlock: { after_ok = 1 }
+                        IfCondition LessThan(next_pos, len) ThenBlock: {
+                            ap = GetByte(cmd, next_pos)
+                            IfCondition EqualTo(ap, 32)  ThenBlock: { after_ok = 1 }  // space
+                            IfCondition EqualTo(ap, 9)   ThenBlock: { after_ok = 1 }  // tab
+                            IfCondition EqualTo(ap, 10)  ThenBlock: { after_ok = 1 }  // newline
+                            IfCondition EqualTo(ap, 0)   ThenBlock: { after_ok = 1 }  // null
+                        }
+                        IfCondition EqualTo(after_ok, 1) ThenBlock: { ReturnValue(1) }
+                    }
+                }
+            }
+            i = Add(i, 1)
+        }
+        ReturnValue(0)
+    }
+}
+
+// Generic word-boundary matcher: returns 1 if `word` appears in `cmd` as a
+// standalone command word (preceded and followed by shell separators or boundaries).
+Function.CCBash_ContainsWord {
+    Input: cmd: Address
+    Input: word: Address
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(cmd, 0) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(word, 0) ThenBlock: { ReturnValue(0) }
+        cmd_len  = StringLength(cmd)
+        word_len = StringLength(word)
+        IfCondition EqualTo(word_len, 0)              ThenBlock: { ReturnValue(0) }
+        IfCondition LessThan(cmd_len, word_len)       ThenBlock: { ReturnValue(0) }
+        i = 0
+        limit = Subtract(cmd_len, word_len)
+        WhileLoop LessEqual(i, limit) {
+            match = 1
+            k = 0
+            WhileLoop LessThan(k, word_len) {
+                IfCondition NotEqual(GetByte(cmd, Add(i, k)), GetByte(word, k)) ThenBlock: {
+                    match = 0
+                    BreakLoop
+                }
+                k = Add(k, 1)
+            }
+            IfCondition EqualTo(match, 1) ThenBlock: {
+                before_ok = 0
+                IfCondition EqualTo(i, 0) ThenBlock: { before_ok = 1 }
+                IfCondition GreaterThan(i, 0) ThenBlock: {
+                    bp = GetByte(cmd, Subtract(i, 1))
+                    IfCondition EqualTo(bp, 32)  ThenBlock: { before_ok = 1 }
+                    IfCondition EqualTo(bp, 9)   ThenBlock: { before_ok = 1 }
+                    IfCondition EqualTo(bp, 10)  ThenBlock: { before_ok = 1 }
+                    IfCondition EqualTo(bp, 59)  ThenBlock: { before_ok = 1 }
+                    IfCondition EqualTo(bp, 124) ThenBlock: { before_ok = 1 }
+                    IfCondition EqualTo(bp, 38)  ThenBlock: { before_ok = 1 }
+                    IfCondition EqualTo(bp, 40)  ThenBlock: { before_ok = 1 }
+                }
+                IfCondition EqualTo(before_ok, 1) ThenBlock: {
+                    after_ok = 0
+                    np = Add(i, word_len)
+                    IfCondition GreaterEqual(np, cmd_len) ThenBlock: { after_ok = 1 }
+                    IfCondition LessThan(np, cmd_len) ThenBlock: {
+                        ap = GetByte(cmd, np)
+                        IfCondition EqualTo(ap, 32)  ThenBlock: { after_ok = 1 }
+                        IfCondition EqualTo(ap, 9)   ThenBlock: { after_ok = 1 }
+                        IfCondition EqualTo(ap, 10)  ThenBlock: { after_ok = 1 }
+                        IfCondition EqualTo(ap, 0)   ThenBlock: { after_ok = 1 }
+                    }
+                    IfCondition EqualTo(after_ok, 1) ThenBlock: { ReturnValue(1) }
+                }
+            }
+            i = Add(i, 1)
+        }
+        ReturnValue(0)
+    }
+}
+
+Function.CCBash_ContainsMv {
+    Input: cmd: Address
+    Output: Integer
+    Body: { ReturnValue(CCBash_ContainsWord(cmd, "mv")) }
+}
+
+Function.CCBash_ContainsDd {
+    Input: cmd: Address
+    Output: Integer
+    Body: { ReturnValue(CCBash_ContainsWord(cmd, "dd")) }
+}
+
+Function.CCBash_ContainsCrontab {
+    Input: cmd: Address
+    Output: Integer
+    Body: { ReturnValue(CCBash_ContainsWord(cmd, "crontab")) }
+}
+
+// Returns 1 if cmd contains kill, killall, or pkill as a command word.
+Function.CCBash_ContainsKillCmd {
+    Input: cmd: Address
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(CCBash_ContainsWord(cmd, "kill"),    1) ThenBlock: { ReturnValue(1) }
+        IfCondition EqualTo(CCBash_ContainsWord(cmd, "killall"), 1) ThenBlock: { ReturnValue(1) }
+        IfCondition EqualTo(CCBash_ContainsWord(cmd, "pkill"),   1) ThenBlock: { ReturnValue(1) }
+        ReturnValue(0)
+    }
+}
+
+// Returns 1 if cmd pipes output to sh or bash (e.g. curl url | sh).
+// Skips || (logical OR). Matches: | sh, | bash, |sh, |bash.
+Function.CCBash_ContainsPipeToShell {
+    Input: cmd: Address
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(cmd, 0) ThenBlock: { ReturnValue(0) }
+        len = StringLength(cmd)
+        i = 0
+        WhileLoop LessThan(i, len) {
+            IfCondition EqualTo(GetByte(cmd, i), 124) ThenBlock: {  // '|'
+                is_real_pipe = 1
+                IfCondition LessThan(Add(i, 1), len) ThenBlock: {
+                    IfCondition EqualTo(GetByte(cmd, Add(i, 1)), 124) ThenBlock: {
+                        is_real_pipe = 0  // || is logical OR, not a pipe
+                    }
+                }
+                IfCondition EqualTo(is_real_pipe, 1) ThenBlock: {
+                    j = Add(i, 1)
+                    WhileLoop LessThan(j, len) {
+                        b = GetByte(cmd, j)
+                        IfCondition And(NotEqual(b, 32), NotEqual(b, 9)) ThenBlock: { BreakLoop }
+                        j = Add(j, 1)
+                    }
+                    // If token is an absolute path, strip to basename first
+                    IfCondition EqualTo(GetByte(cmd, j), 47) ThenBlock: {  // '/'
+                        last_sl = j
+                        sk = j
+                        WhileLoop LessThan(sk, len) {
+                            bsk = GetByte(cmd, sk)
+                            IfCondition EqualTo(bsk, 0)  ThenBlock: { BreakLoop }
+                            IfCondition EqualTo(bsk, 32) ThenBlock: { BreakLoop }
+                            IfCondition EqualTo(bsk, 9)  ThenBlock: { BreakLoop }
+                            IfCondition EqualTo(bsk, 10) ThenBlock: { BreakLoop }
+                            IfCondition EqualTo(bsk, 47) ThenBlock: { last_sl = sk }
+                            sk = Add(sk, 1)
+                        }
+                        j = Add(last_sl, 1)
+                    }
+                    // Check for "sh" followed by word boundary
+                    IfCondition LessThan(Add(j, 1), len) ThenBlock: {
+                        IfCondition EqualTo(GetByte(cmd, j), 115) ThenBlock: {           // 's'
+                            IfCondition EqualTo(GetByte(cmd, Add(j, 1)), 104) ThenBlock: { // 'h'
+                                ap = 0
+                                IfCondition LessThan(Add(j, 2), len) ThenBlock: {
+                                    ap = GetByte(cmd, Add(j, 2))
+                                }
+                                IfCondition EqualTo(ap, 0)  ThenBlock: { ReturnValue(1) }
+                                IfCondition EqualTo(ap, 32) ThenBlock: { ReturnValue(1) }
+                                IfCondition EqualTo(ap, 9)  ThenBlock: { ReturnValue(1) }
+                                IfCondition EqualTo(ap, 10) ThenBlock: { ReturnValue(1) }
+                            }
+                        }
+                    }
+                    // Check for "bash" followed by word boundary
+                    IfCondition LessThan(Add(j, 3), len) ThenBlock: {
+                        IfCondition EqualTo(GetByte(cmd, j), 98) ThenBlock: {               // 'b'
+                            IfCondition EqualTo(GetByte(cmd, Add(j, 1)), 97) ThenBlock: {   // 'a'
+                                IfCondition EqualTo(GetByte(cmd, Add(j, 2)), 115) ThenBlock: { // 's'
+                                    IfCondition EqualTo(GetByte(cmd, Add(j, 3)), 104) ThenBlock: { // 'h'
+                                        ap2 = 0
+                                        IfCondition LessThan(Add(j, 4), len) ThenBlock: {
+                                            ap2 = GetByte(cmd, Add(j, 4))
+                                        }
+                                        IfCondition EqualTo(ap2, 0)  ThenBlock: { ReturnValue(1) }
+                                        IfCondition EqualTo(ap2, 32) ThenBlock: { ReturnValue(1) }
+                                        IfCondition EqualTo(ap2, 9)  ThenBlock: { ReturnValue(1) }
+                                        IfCondition EqualTo(ap2, 10) ThenBlock: { ReturnValue(1) }
                                     }
                                 }
                             }
-                            j = Add(j, 1)
                         }
                     }
                 }
@@ -685,8 +861,28 @@ Function.CCBash_HandleRequest {
                 CCBash_SendError(client_fd, id, "Blocked: `sudo` is strictly forbidden. Do not attempt to escalate privileges.")
                 ReturnValue(0)
             }
-            IfCondition EqualTo(CCBash_IsDangerousRm(cmd), 1) ThenBlock: {
-                CCBash_SendError(client_fd, id, "Blocked: `rm` targeting a system directory (/, /etc, /bin, /usr, /lib, /sys, /proc, /dev, /boot, /root, /mnt). Use a scoped path under /tmp or the project directory.")
+            IfCondition EqualTo(CCBash_ContainsRm(cmd), 1) ThenBlock: {
+                CCBash_SendError(client_fd, id, "Blocked: `rm` is not permitted. File deletion is the user's responsibility.")
+                ReturnValue(0)
+            }
+            IfCondition EqualTo(CCBash_ContainsMv(cmd), 1) ThenBlock: {
+                CCBash_SendError(client_fd, id, "Blocked: `mv` is not permitted. File management is the user's responsibility.")
+                ReturnValue(0)
+            }
+            IfCondition EqualTo(CCBash_ContainsDd(cmd), 1) ThenBlock: {
+                CCBash_SendError(client_fd, id, "Blocked: `dd` can overwrite raw devices. File operations are the user's responsibility.")
+                ReturnValue(0)
+            }
+            IfCondition EqualTo(CCBash_ContainsKillCmd(cmd), 1) ThenBlock: {
+                CCBash_SendError(client_fd, id, "Blocked: `kill`/`killall`/`pkill` are not permitted. Process management is the user's responsibility.")
+                ReturnValue(0)
+            }
+            IfCondition EqualTo(CCBash_ContainsCrontab(cmd), 1) ThenBlock: {
+                CCBash_SendError(client_fd, id, "Blocked: `crontab` installs persistent scheduled tasks and is not permitted.")
+                ReturnValue(0)
+            }
+            IfCondition EqualTo(CCBash_ContainsPipeToShell(cmd), 1) ThenBlock: {
+                CCBash_SendError(client_fd, id, "Blocked: piping to `sh` or `bash` is not permitted (supply-chain risk).")
                 ReturnValue(0)
             }
             IfCondition EqualTo(CCBash_IsRedirectToSystemPath(cmd), 1) ThenBlock: {
@@ -708,7 +904,7 @@ Function.CCBash_HandleRequest {
                 CCBash_SendError(client_fd, id, "fork/exec failed")
             } ElseBlock: {
                 IfCondition EqualTo(truncated, 1) ThenBlock: {
-                    marker = "\n[truncated: output exceeded MAX_OUTPUT]"
+                    marker = "\n[OUTPUT TRUNCATED at 50KB — use Grep tool for targeted code search, or pipe through head -N]"
                     final = StringConcat(content, marker)
                     CCBash_SendResult(client_fd, id, final, 1)
                 } ElseBlock: {
