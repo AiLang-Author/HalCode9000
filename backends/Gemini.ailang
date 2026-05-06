@@ -386,17 +386,48 @@ Function.Gemini_ParseToolCallDelta {
     Body: {
         idx = JSON.GetNumber(tc, "index")
 
-        IfCondition GreaterEqual(idx, GEMINIConst.MAX_TOOLS) ThenBlock: {
+        // Gemini 3.1-pro parallel tool calls all arrive with index=0
+        // (either a Gemini quirk or Library.JSON XSHash collision on "index").
+        // Route by id instead: each unique id gets its own slot; arg-only
+        // chunks (no id) fall back to idx as a best-effort hint.
+        id_str = JSON.GetString(tc, "id")
+        actual_idx = idx
+
+        IfCondition NotEqual(id_str, 0) ThenBlock: {
+            IfCondition GreaterThan(StringLength(id_str), 0) ThenBlock: {
+                // Search existing slots for a matching id
+                found = -1
+                si = 0
+                WhileLoop LessThan(si, GEMINIState.tool_count) {
+                    s2 = Add(GEMINIState.tool_slots, Multiply(si, 40))
+                    eid = Dereference(Add(s2, 0))
+                    IfCondition NotEqual(eid, 0) ThenBlock: {
+                        IfCondition EqualTo(StringCompare(eid, id_str), 0) ThenBlock: {
+                            found = si
+                            si = GEMINIConst.MAX_TOOLS
+                        }
+                    }
+                    si = Add(si, 1)
+                }
+                IfCondition GreaterEqual(found, 0) ThenBlock: {
+                    actual_idx = found
+                } ElseBlock: {
+                    actual_idx = GEMINIState.tool_count
+                    GEMINIState.tool_count = Add(GEMINIState.tool_count, 1)
+                }
+            }
+        }
+
+        IfCondition GreaterEqual(actual_idx, GEMINIConst.MAX_TOOLS) ThenBlock: {
             ReturnValue(0)
         }
 
-        slot = Add(GEMINIState.tool_slots, Multiply(idx, 40))
-        id_ptr = Dereference(Add(slot, 0))
+        slot     = Add(GEMINIState.tool_slots, Multiply(actual_idx, 40))
+        id_ptr   = Dereference(Add(slot, 0))
         name_ptr = Dereference(Add(slot, 8))
         args_ptr = Dereference(Add(slot, 16))
         args_used = Dereference(Add(slot, 24))
 
-        id_str = JSON.GetString(tc, "id")
         IfCondition NotEqual(id_str, 0) ThenBlock: {
             i = 0
             len = StringLength(id_str)
@@ -418,11 +449,6 @@ Function.Gemini_ParseToolCallDelta {
                     j = Add(j, 1)
                 }
                 SetByte(name_ptr, nlen, 0)
-
-                IfCondition GreaterEqual(idx, GEMINIState.tool_count) ThenBlock: {
-                    GEMINIState.tool_count = Add(idx, 1)
-                }
-                    
                 msg = StringConcat("Preparing tool: ", name_str)
                 UI.ChatTag("⚙", msg, 8)
             }
@@ -443,8 +469,7 @@ Function.Gemini_ParseToolCallDelta {
             }
 
             // Gemini 3.1 thinking models attach a thought_signature to function
-            // calls. It must be echoed back verbatim in the next request or the
-            // API returns 400 INVALID_ARGUMENT.
+            // calls — must be echoed back verbatim or API returns 400.
             sig_str = JSON.GetString(fn_obj, "thought_signature")
             IfCondition NotEqual(sig_str, 0) ThenBlock: {
                 sig_ptr = Dereference(Add(slot, 32))
