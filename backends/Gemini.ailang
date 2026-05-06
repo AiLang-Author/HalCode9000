@@ -168,11 +168,18 @@ Function.Gemini.BuildHeaders {
     }
 }
 
+
+// --- REPLACE YOUR EXISTING BuildRequest WITH THIS ---
 Function.Gemini.BuildRequest {
     Input: messages_arr: Address
     Input: tools_arr: Address
     Output: Address
     Body: {
+        // [FIX] Reset tool state if the stream dropped previously
+        IfCondition EqualTo(GEMINIState.has_tools_flag, 0) ThenBlock: {
+            GEMINIState.tool_count = 0
+        }
+
         req = JSON.NewObject()
         JSON.SetString(req, "model", GEMINICfg.model)
         JSON.SetNumber(req, "max_tokens", GEMINICfg.max_tokens)
@@ -198,6 +205,15 @@ Function.Gemini.BuildRequest {
             }
             i = Add(i, 1)
         }
+
+        // [FIX] Stream Resumption: Inject partial text from a dropped connection
+        IfCondition GreaterThan(GEMINIState.text_used, 0) ThenBlock: {
+            partial_msg = JSON.NewObject()
+            JSON.SetString(partial_msg, "role", "assistant")
+            JSON.SetString(partial_msg, "content", GEMINIState.text_buf)
+            JSON.PushObject(new_msgs, partial_msg)
+        }
+
         JSON.SetArray(req, "messages", new_msgs)
 
         tool_len = JSON.ArrayLength(tools_arr)
@@ -230,7 +246,6 @@ Function.Gemini.BuildRequest {
                     JSON.SetObject(oai_tool, "function", fn_obj)
                     JSON.PushObject(new_tools, oai_tool)
                 }
-
                 j = Add(j, 1)
             }
             JSON.SetArray(req, "tools", new_tools)
@@ -240,6 +255,128 @@ Function.Gemini.BuildRequest {
         ReturnValue(JSON.SerializeObject(req))
     }
 }
+
+// --- REPLACE YOUR EXISTING OnEvent WITH THIS ---
+Function.Gemini.OnEvent {
+    Input: event_type: Address
+    Input: event_data: Address
+    Output: Integer
+    Body: {
+        // [FIX] Blocking disk I/O has been removed to prevent TCP timeouts.
+        
+        IfCondition EqualTo(StringCompare(event_data, "[DONE]"), 0) ThenBlock: {
+            IfCondition EqualTo(GEMINIState.has_tools_flag, 1) ThenBlock: {
+                ReturnValue(GEMINISignal.TURN_DONE_WITH_TOOLS)
+            } ElseBlock: {
+                ReturnValue(GEMINISignal.TURN_DONE_NO_TOOLS)
+            }
+        }
+
+        obj = JSON.AsObject(ParseJSON(event_data))
+        IfCondition EqualTo(obj, 0) ThenBlock: {
+            ReturnValue(GEMINISignal.CONTINUE)
+        }
+
+        usage = JSON.GetObject(obj, "usage")
+        IfCondition NotEqual(usage, 0) ThenBlock: {
+            GEMINIState.last_input_tokens = JSON.GetNumber(usage, "prompt_tokens")
+            GEMINIState.last_output_tokens = JSON.GetNumber(usage, "completion_tokens")
+        }
+
+        choices = JSON.GetArray(obj, "choices")
+        IfCondition NotEqual(choices, 0) ThenBlock: {
+            c_len = JSON.ArrayLength(choices)
+            IfCondition GreaterThan(c_len, 0) ThenBlock: {
+                c0_tag = JSON.ArrayGet(choices, 0)
+                c0 = JSON.AsObject(c0_tag)
+
+                fr = JSON.GetString(c0, "finish_reason")
+                IfCondition EqualTo(fr, 0) ThenBlock: {
+                    fr = JSON.GetString(c0, "finishReason") // Gemini camelCase quirk
+                }
+                IfCondition NotEqual(fr, 0) ThenBlock: {
+                    IfCondition Or(EqualTo(StringCompare(fr, "tool_calls"), 0), EqualTo(StringCompare(fr, "TOOL_CALLS"), 0)) ThenBlock: {
+                        GEMINIState.has_tools_flag = 1
+                    }
+                    IfCondition Or(EqualTo(StringCompare(fr, "stop"), 0), EqualTo(StringCompare(fr, "STOP"), 0)) ThenBlock: {
+                        GEMINIState.has_stop_flag = 1
+                    }
+                }
+
+                delta = JSON.GetObject(c0, "delta")
+                IfCondition NotEqual(delta, 0) ThenBlock: {
+                    content = JSON.GetString(delta, "content")
+                    IfCondition NotEqual(content, 0) ThenBlock: {
+                        clen = StringLength(content)
+                        IfCondition GreaterThan(clen, 0) ThenBlock: {
+                            i = 0
+                            used = GEMINIState.text_used
+                            WhileLoop LessThan(i, clen) {
+                                IfCondition LessThan(used, Subtract(GEMINIConst.TEXT_BUF_SZ, 1)) ThenBlock: {
+                                    SetByte(GEMINIState.text_buf, used, GetByte(content, i))
+                                    used = Add(used, 1)
+                                }
+                                i = Add(i, 1)
+                            }
+                            SetByte(GEMINIState.text_buf, used, 0)
+                            GEMINIState.text_used = used
+
+                            UI.ChatPrint(content)
+                        }
+                    }
+
+                    tcs = JSON.GetArray(delta, "tool_calls")
+                    IfCondition NotEqual(tcs, 0) ThenBlock: {
+                        tlen = JSON.ArrayLength(tcs)
+                        j = 0
+                        WhileLoop LessThan(j, tlen) {
+                            tc_tag = JSON.ArrayGet(tcs, j)
+                            tc_obj = JSON.AsObject(tc_tag)
+                            Gemini_ParseToolCallDelta(tc_obj)
+                            j = Add(j, 1)
+                        }
+                    }
+                }
+            }
+        }
+
+        ReturnValue(GEMINISignal.CONTINUE)
+    }
+}
+
+// --- REPLACE YOUR EXISTING IsCleanStop WITH THIS ---
+Function.Gemini.IsCleanStop {
+    Output: Integer
+    Body: {
+        // [FIX] Removed the text fallback. Mid-stream drops will now correctly 
+        // return 0, prompting your main loop to retry.
+        IfCondition Or(EqualTo(GEMINIState.has_stop_flag, 1), EqualTo(GEMINIState.has_tools_flag, 1)) ThenBlock: {
+            ReturnValue(1)
+        }
+        
+        ReturnValue(0)
+    }
+}
+
+// --- REPLACE YOUR EXISTING CommitAssistantToHistory WITH THIS ---
+Function.Gemini.CommitAssistantToHistory {
+    Body: {
+        // [FIX] Safely build the JSON object natively instead of escaping strings manually.
+        msg = JSON.NewObject()
+        JSON.SetString(msg, "role", "assistant")
+        
+        IfCondition GreaterThan(GEMINIState.text_used, 0) ThenBlock: {
+            JSON.SetString(msg, "content", GEMINIState.text_buf)
+        } ElseBlock: {
+            JSON.SetString(msg, "content", "")
+        }
+        
+        IfCondition NotEqual(msg, 0) ThenBlock: {
+            History.AppendRaw(msg)
+        }
+    }
+}
+
 
 Function.Gemini_ParseToolCallDelta {
     Input: tc: Address

@@ -1441,7 +1441,7 @@ Function.CC_PromptProvider {
             CC_WriteStdout("  1. Anthropic    (claude-sonnet-4-6)\n")
             CC_WriteStdout("  2. OpenAI       (gpt-4o)\n")
             CC_WriteStdout("  3. Grok         (xAI — grok-3)\n")
-            CC_WriteStdout("  4. Google       (gemini-2.5-flash)\n")
+            CC_WriteStdout("  4. Google       (Gemini — model select)\n")
             CC_WriteStdout("  5. DeepSeek     (deepseek-v4-flash)\n")
             CC_WriteStdout("  6. OpenRouter   (300+ models)\n")
 
@@ -1513,10 +1513,34 @@ Function.CC_PromptProvider {
                                        "/v1/chat/completions",   "grok-3",   "xai")
                 done = 1
             }
-            // 4 — Google
+            // 4 — Google with model sub-menu
             IfCondition EqualTo(choice, 4) ThenBlock: {
-                prov = CC_MakeProvider("Google",   "gemini",   "https://generativelanguage.googleapis.com",
-                                       "/v1beta/openai/chat/completions", "gemini-2.5-flash", "google")
+                prov = CC_MakeProvider("Google", "gemini", "https://generativelanguage.googleapis.com",
+                                       "/v1beta/openai/chat/completions", "gemini-2.5-flash", "google_flash")
+                CC_WriteStdout("\n  Gemini model:\n")
+                CC_WriteStdout("    a) gemini-2.5-flash      (fast, default)\n")
+                CC_WriteStdout("    b) gemini-2.5-pro        (powerful)\n")
+                CC_WriteStdout("    c) gemini-2.0-flash      (stable)\n")
+                CC_WriteStdout("    d) gemini-2.5-flash-lite (cheapest)\n")
+                CC_WriteStdout("    q) Back\n\n")
+                CC_WriteStdout("  Choice [a]: ")
+                gmbuf = Allocate(16)
+                CC_ReadStdinLine(gmbuf, 16)
+                gmch = GetByte(gmbuf, 0)
+                Deallocate(gmbuf, 16)
+                IfCondition Or(EqualTo(gmch, 113), EqualTo(gmch, 81)) ThenBlock: { ContinueLoop }
+                IfCondition Or(EqualTo(gmch, 98), EqualTo(gmch, 66)) ThenBlock: {
+                    SelectedProvider.default_model = "gemini-2.5-pro"
+                    SelectedProvider.key_hint      = "google_pro"
+                }
+                IfCondition Or(EqualTo(gmch, 99), EqualTo(gmch, 67)) ThenBlock: {
+                    SelectedProvider.default_model = "gemini-2.0-flash"
+                    SelectedProvider.key_hint      = "google_flash2"
+                }
+                IfCondition Or(EqualTo(gmch, 100), EqualTo(gmch, 68)) ThenBlock: {
+                    SelectedProvider.default_model = "gemini-2.5-flash-lite"
+                    SelectedProvider.key_hint      = "google_lite"
+                }
                 done = 1
             }
             // 5 — DeepSeek with model sub-menu
