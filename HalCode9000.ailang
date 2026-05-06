@@ -1516,12 +1516,12 @@ Function.CC_PromptProvider {
             // 4 — Google with model sub-menu
             IfCondition EqualTo(choice, 4) ThenBlock: {
                 prov = CC_MakeProvider("Google", "gemini", "https://generativelanguage.googleapis.com",
-                                       "/v1beta/openai/chat/completions", "gemini-2.5-flash", "google_flash")
+                                       "/v1beta/openai/chat/completions", "gemini-3.1-pro-preview", "google_pro31")
                 CC_WriteStdout("\n  Gemini model:\n")
-                CC_WriteStdout("    a) gemini-2.5-flash      (fast, default)\n")
-                CC_WriteStdout("    b) gemini-2.5-pro        (powerful)\n")
-                CC_WriteStdout("    c) gemini-2.0-flash      (stable)\n")
-                CC_WriteStdout("    d) gemini-2.5-flash-lite (cheapest)\n")
+                CC_WriteStdout("    a) gemini-3.1-pro-preview   (powerful, default)\n")
+                CC_WriteStdout("    b) gemini-3-flash-preview   (fast, reasoning)\n")
+                CC_WriteStdout("    c) gemini-2.5-flash         (stable)\n")
+                CC_WriteStdout("    d) gemini-2.5-flash-lite    (cheapest)\n")
                 CC_WriteStdout("    q) Back\n\n")
                 CC_WriteStdout("  Choice [a]: ")
                 gmbuf = Allocate(16)
@@ -1530,12 +1530,12 @@ Function.CC_PromptProvider {
                 Deallocate(gmbuf, 16)
                 IfCondition Or(EqualTo(gmch, 113), EqualTo(gmch, 81)) ThenBlock: { ContinueLoop }
                 IfCondition Or(EqualTo(gmch, 98), EqualTo(gmch, 66)) ThenBlock: {
-                    SelectedProvider.default_model = "gemini-2.5-pro"
-                    SelectedProvider.key_hint      = "google_pro"
+                    SelectedProvider.default_model = "gemini-3-flash-preview"
+                    SelectedProvider.key_hint      = "google_flash3"
                 }
                 IfCondition Or(EqualTo(gmch, 99), EqualTo(gmch, 67)) ThenBlock: {
-                    SelectedProvider.default_model = "gemini-2.0-flash"
-                    SelectedProvider.key_hint      = "google_flash2"
+                    SelectedProvider.default_model = "gemini-2.5-flash"
+                    SelectedProvider.key_hint      = "google_flash"
                 }
                 IfCondition Or(EqualTo(gmch, 100), EqualTo(gmch, 68)) ThenBlock: {
                     SelectedProvider.default_model = "gemini-2.5-flash-lite"
