@@ -468,9 +468,17 @@ Function.Gemini_ParseToolCallDelta {
                 StoreValue(Add(slot, 24), args_used)
             }
 
-            // Gemini 3.1 thinking models attach a thought_signature to function
-            // calls — must be echoed back verbatim or API returns 400.
-            sig_str = JSON.GetString(fn_obj, "thought_signature")
+            // Gemini 3.1 thinking models return thought_signature at
+            // tc.extra_content.google.thought_signature (not inside fn_obj).
+            // Must be echoed back verbatim or API returns 400.
+            sig_str = 0
+            extra_obj = JSON.GetObject(tc, "extra_content")
+            IfCondition NotEqual(extra_obj, 0) ThenBlock: {
+                google_obj = JSON.GetObject(extra_obj, "google")
+                IfCondition NotEqual(google_obj, 0) ThenBlock: {
+                    sig_str = JSON.GetString(google_obj, "thought_signature")
+                }
+            }
             IfCondition NotEqual(sig_str, 0) ThenBlock: {
                 sig_ptr = Dereference(Add(slot, 32))
                 slen = StringLength(sig_str)
