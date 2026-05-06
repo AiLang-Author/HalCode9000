@@ -1776,7 +1776,7 @@ Function.CC_RunAuth {
             IfCondition EqualTo(StringCompare(status, "needs_setup_apikey"), 0) ThenBlock: {
                 CC_WriteStdout("\nNo API key found for ")
                 CC_WriteStdout(SelectedProvider.name)
-                CC_WriteStdout(".\n\nPlease paste your API key here: ")
+                CC_WriteStdout(".\n\nPlease paste your API key here (Enter to go back): ")
                 key_buf = Allocate(2048)
                 key_len = CC_ReadStdinLine(key_buf, 2048)
                 IfCondition GreaterThan(key_len, 0) ThenBlock: {

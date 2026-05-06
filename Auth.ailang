@@ -638,12 +638,17 @@ Function.Auth_ReadKeyFile {
             path2  = StringConcat(stem2, "_key")
             fd = SystemCall(AuthSys.SYS_OPEN, path2, 0, 0, 0, 0)
             IfCondition LessThan(fd, 0) ThenBlock: {
-                // Legacy fallback: $HOME/.halcode/api_key
-                legacy = StringConcat(haldir, "api_key")
-                fd = SystemCall(AuthSys.SYS_OPEN, legacy, 0, 0, 0, 0)
-                IfCondition LessThan(fd, 0) ThenBlock: {
-                    fd = SystemCall(AuthSys.SYS_OPEN, "/root/.halcode/api_key", 0, 0, 0, 0)
-                    IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
+                // Legacy fallback to api_key only for the anthropic hint —
+                // other providers must NOT pick up the Anthropic key by mistake.
+                IfCondition EqualTo(StringCompare(hint, "anthropic"), 0) ThenBlock: {
+                    legacy = StringConcat(haldir, "api_key")
+                    fd = SystemCall(AuthSys.SYS_OPEN, legacy, 0, 0, 0, 0)
+                    IfCondition LessThan(fd, 0) ThenBlock: {
+                        fd = SystemCall(AuthSys.SYS_OPEN, "/root/.halcode/api_key", 0, 0, 0, 0)
+                        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
+                    }
+                } ElseBlock: {
+                    ReturnValue(0)
                 }
             }
         }
