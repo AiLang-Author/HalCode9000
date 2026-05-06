@@ -347,39 +347,6 @@ Function.Gemini.OnEvent {
     }
 }
 
-// --- REPLACE YOUR EXISTING IsCleanStop WITH THIS ---
-Function.Gemini.IsCleanStop {
-    Output: Integer
-    Body: {
-        // [FIX] Removed the text fallback. Mid-stream drops will now correctly 
-        // return 0, prompting your main loop to retry.
-        IfCondition Or(EqualTo(GEMINIState.has_stop_flag, 1), EqualTo(GEMINIState.has_tools_flag, 1)) ThenBlock: {
-            ReturnValue(1)
-        }
-        
-        ReturnValue(0)
-    }
-}
-
-// --- REPLACE YOUR EXISTING CommitAssistantToHistory WITH THIS ---
-Function.Gemini.CommitAssistantToHistory {
-    Body: {
-        // [FIX] Safely build the JSON object natively instead of escaping strings manually.
-        msg = JSON.NewObject()
-        JSON.SetString(msg, "role", "assistant")
-        
-        IfCondition GreaterThan(GEMINIState.text_used, 0) ThenBlock: {
-            JSON.SetString(msg, "content", GEMINIState.text_buf)
-        } ElseBlock: {
-            JSON.SetString(msg, "content", "")
-        }
-        
-        IfCondition NotEqual(msg, 0) ThenBlock: {
-            History.AppendRaw(msg)
-        }
-    }
-}
-
 
 Function.Gemini_ParseToolCallDelta {
     Input: tc: Address
@@ -680,16 +647,18 @@ Function.Gemini_BuildAssistantMsgStr {
                 esc_args = JSON.EscapeString(safe_args)
                 s = StringConcat(s, "{\"id\":\"")
                 s = StringConcat(s, esc_id)
-                s = StringConcat(s, "\",\"type\":\"function\",\"function\":{\"name\":\"")
+                s = StringConcat(s, "\",\"type\":\"function\"")
+                IfCondition NotEqual(sig_ptr, 0) ThenBlock: {
+                    IfCondition GreaterThan(StringLength(sig_ptr), 0) ThenBlock: {
+                        s = StringConcat(s, ",\"extra_content\":{\"google\":{\"thought_signature\":\"")
+                        s = StringConcat(s, sig_ptr)
+                        s = StringConcat(s, "\"}}")
+                    }
+                }
+                s = StringConcat(s, ",\"function\":{\"name\":\"")
                 s = StringConcat(s, esc_name)
                 s = StringConcat(s, "\",\"arguments\":\"")
                 s = StringConcat(s, esc_args)
-                IfCondition NotEqual(sig_ptr, 0) ThenBlock: {
-                    IfCondition GreaterThan(StringLength(sig_ptr), 0) ThenBlock: {
-                        s = StringConcat(s, "\",\"thought_signature\":\"")
-                        s = StringConcat(s, sig_ptr)
-                    }
-                }
                 s = StringConcat(s, "\"}}")
                 i = Add(i, 1)
             }
