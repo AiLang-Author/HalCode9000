@@ -66,19 +66,22 @@ Function.Gemini.Init {
         GEMINICfg.system_prompt = system_prompt
 
         GEMINIState.text_buf     = Allocate(GEMINIConst.TEXT_BUF_SZ)
-        GEMINIState.tool_slots   = Allocate(Multiply(GEMINIConst.MAX_TOOLS, 32))
+        GEMINIState.tool_slots   = Allocate(Multiply(GEMINIConst.MAX_TOOLS, 40))
 
         i = 0
         WhileLoop LessThan(i, GEMINIConst.MAX_TOOLS) {
-            slot = Add(GEMINIState.tool_slots, Multiply(i, 32))
-            id_ptr = Allocate(128)
+            slot = Add(GEMINIState.tool_slots, Multiply(i, 40))
+            id_ptr   = Allocate(128)
             name_ptr = Allocate(128)
             args_ptr = Allocate(GEMINIConst.ARGS_BUF_SZ)
+            sig_ptr  = Allocate(4096)
 
-            StoreValue(Add(slot, 0), id_ptr)
-            StoreValue(Add(slot, 8), name_ptr)
+            StoreValue(Add(slot, 0),  id_ptr)
+            StoreValue(Add(slot, 8),  name_ptr)
             StoreValue(Add(slot, 16), args_ptr)
             StoreValue(Add(slot, 24), 0)
+            StoreValue(Add(slot, 32), sig_ptr)
+            SetByte(sig_ptr, 0, 0)
 
             i = Add(i, 1)
         }
@@ -115,7 +118,7 @@ Function.Gemini.GetToolName {
     Output: Address
     Body: {
         IfCondition GreaterEqual(i, GEMINIConst.MAX_TOOLS) ThenBlock: { ReturnValue(0) }
-        slot = Add(GEMINIState.tool_slots, Multiply(i, 32))
+        slot = Add(GEMINIState.tool_slots, Multiply(i, 40))
         ReturnValue(Dereference(Add(slot, 8)))
     }
 }
@@ -125,7 +128,7 @@ Function.Gemini.GetToolId {
     Output: Address
     Body: {
         IfCondition GreaterEqual(i, GEMINIConst.MAX_TOOLS) ThenBlock: { ReturnValue(0) }
-        slot = Add(GEMINIState.tool_slots, Multiply(i, 32))
+        slot = Add(GEMINIState.tool_slots, Multiply(i, 40))
         ReturnValue(Dereference(Add(slot, 0)))
     }
 }
@@ -387,7 +390,7 @@ Function.Gemini_ParseToolCallDelta {
             ReturnValue(0)
         }
 
-        slot = Add(GEMINIState.tool_slots, Multiply(idx, 32))
+        slot = Add(GEMINIState.tool_slots, Multiply(idx, 40))
         id_ptr = Dereference(Add(slot, 0))
         name_ptr = Dereference(Add(slot, 8))
         args_ptr = Dereference(Add(slot, 16))
@@ -437,6 +440,27 @@ Function.Gemini_ParseToolCallDelta {
                 }
                 SetByte(args_ptr, args_used, 0)
                 StoreValue(Add(slot, 24), args_used)
+            }
+
+            // Gemini 3.1 thinking models attach a thought_signature to function
+            // calls. It must be echoed back verbatim in the next request or the
+            // API returns 400 INVALID_ARGUMENT.
+            sig_str = JSON.GetString(fn_obj, "thought_signature")
+            IfCondition NotEqual(sig_str, 0) ThenBlock: {
+                sig_ptr = Dereference(Add(slot, 32))
+                slen = StringLength(sig_str)
+                sk = 0
+                WhileLoop LessThan(sk, slen) {
+                    IfCondition LessThan(sk, 4095) ThenBlock: {
+                        SetByte(sig_ptr, sk, GetByte(sig_str, sk))
+                    }
+                    sk = Add(sk, 1)
+                }
+                IfCondition LessThan(slen, 4096) ThenBlock: {
+                    SetByte(sig_ptr, slen, 0)
+                } ElseBlock: {
+                    SetByte(sig_ptr, 4095, 0)
+                }
             }
         }
     }
@@ -557,7 +581,7 @@ Function.Gemini.GetPendingTools {
         arr = JSON.NewArray()
         i = 0
         WhileLoop LessThan(i, GEMINIState.tool_count) {
-            slot = Add(GEMINIState.tool_slots, Multiply(i, 32))
+            slot = Add(GEMINIState.tool_slots, Multiply(i, 40))
             id_ptr = Dereference(Add(slot, 0))
             name_ptr = Dereference(Add(slot, 8))
             args_ptr = Dereference(Add(slot, 16))
@@ -610,10 +634,11 @@ Function.Gemini_BuildAssistantMsgStr {
             i = 0
             WhileLoop LessThan(i, GEMINIState.tool_count) {
                 IfCondition GreaterThan(i, 0) ThenBlock: { s = StringConcat(s, ",") }
-                slot = Add(GEMINIState.tool_slots, Multiply(i, 32))
+                slot = Add(GEMINIState.tool_slots, Multiply(i, 40))
                 id_ptr   = Dereference(Add(slot, 0))
                 name_ptr = Dereference(Add(slot, 8))
                 args_ptr = Dereference(Add(slot, 16))
+                sig_ptr  = Dereference(Add(slot, 32))
                 esc_id   = JSON.EscapeString(id_ptr)
                 esc_name = JSON.EscapeString(name_ptr)
                 safe_args = args_ptr
@@ -626,6 +651,12 @@ Function.Gemini_BuildAssistantMsgStr {
                 s = StringConcat(s, esc_name)
                 s = StringConcat(s, "\",\"arguments\":\"")
                 s = StringConcat(s, esc_args)
+                IfCondition NotEqual(sig_ptr, 0) ThenBlock: {
+                    IfCondition GreaterThan(StringLength(sig_ptr), 0) ThenBlock: {
+                        s = StringConcat(s, "\",\"thought_signature\":\"")
+                        s = StringConcat(s, sig_ptr)
+                    }
+                }
                 s = StringConcat(s, "\"}}")
                 i = Add(i, 1)
             }
@@ -686,15 +717,17 @@ Function.Gemini.Reset {
 
         i = 0
         WhileLoop LessThan(i, GEMINIConst.MAX_TOOLS) {
-            slot = Add(GEMINIState.tool_slots, Multiply(i, 32))
-            id_ptr = Dereference(Add(slot, 0))
+            slot = Add(GEMINIState.tool_slots, Multiply(i, 40))
+            id_ptr   = Dereference(Add(slot, 0))
             name_ptr = Dereference(Add(slot, 8))
             args_ptr = Dereference(Add(slot, 16))
+            sig_ptr  = Dereference(Add(slot, 32))
 
             SetByte(id_ptr, 0, 0)
             SetByte(name_ptr, 0, 0)
             SetByte(args_ptr, 0, 0)
             StoreValue(Add(slot, 24), 0)
+            IfCondition NotEqual(sig_ptr, 0) ThenBlock: { SetByte(sig_ptr, 0, 0) }
 
             i = Add(i, 1)
         }
