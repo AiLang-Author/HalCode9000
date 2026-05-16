@@ -19,6 +19,8 @@ LibraryImport.Browser.JSLexer
 LibraryImport.Browser.JSParser
 LibraryImport.Browser.JSCompiler
 LibraryImport.Browser.JSVM
+LibraryImport.Browser.JSBridge
+LibraryImport.Browser.JSEngine
 
 FixedPool.CCJsSys {
     "SYS_MKDIR":     Initialize=83
@@ -119,12 +121,12 @@ Function.CCJs_HandleRequest {
             }
             JSVM_SetMaxSteps(step_limit)
             
-            // Execute native JavaScript on the AILang VM!
+            // Execute native JavaScript on the AILang VM
             code_len = StringLength(js_code)
-            js_val = JSVM_Eval(js_code, code_len)
-            
+            js_val = JSEngine_EvalString(js_code, code_len)
+
             IfCondition EqualTo(js_val, 0) ThenBlock: {
-                IfCondition EqualTo(JSVM_GetError(), 1) ThenBlock: {
+                IfCondition EqualTo(JSEngine_GetError(), 1) ThenBlock: {
                     result = "[VM ERROR: Execution failed. Step limit exceeded or runtime exception.]"
                 } ElseBlock: {
                     result = "undefined"
@@ -134,7 +136,7 @@ Function.CCJs_HandleRequest {
                 IfCondition EqualTo(str_val, 0) ThenBlock: {
                     result = "undefined"
                 } ElseBlock: {
-                    result = Dereference(Add(str_val, 8)) // Payload of a string JSValue is at offset 8
+                    result = Dereference(Add(str_val, 8))
                 }
             }
             
@@ -149,14 +151,8 @@ SubRoutine.Main {
     CCJsConst.SOCK_DIR  = "/tmp/ailang_cctools"
     CCJsConst.SOCK_PATH = "@halcode/JS"
     
-    // Initialize the JS Runtime environment and built-in natives
-    JSLex_Init()
-    JSParse_Init()
-    JSComp_Init()
-    JSValidate_Init()
-    JSRT_Init()
-    JSVM_Init()
-    JSVM_InstallBuiltins()
+    // Initialize the full JS engine (handles all subsystem init in dependency order)
+    JSEngine_Init()
     
     CCJsState.schema = CCJs_BuildSchema()
     SystemCall(CCJsSys.SYS_MKDIR, CCJsConst.SOCK_DIR, 493, 0, 0, 0)

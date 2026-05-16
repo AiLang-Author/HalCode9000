@@ -66,6 +66,9 @@ FixedPool.CCConst {
     "MAX_CHILDREN":   Initialize=16
     "BIND_WAIT_NS":   Initialize=5000000000   // 5s — allows slower tools like relmem to bind
     "PARK_THRESHOLD": Initialize=32768        // 32KB — fixes PGMEM SPILL PANIC
+    "LOG_DIR":        Initialize=0, CanChange=True
+    "LOG_PATH":       Initialize=0, CanChange=True
+    "LOG_WARN_MSG":   Initialize=0, CanChange=True
 }
 
 FixedPool.CCRunState {
@@ -77,6 +80,9 @@ FixedPool.CCRunState {
     "session_turn":  Initialize=0, CanChange=True
     "auth_mode":     Initialize=0, CanChange=True
     "auth_cred":     Initialize=0, CanChange=True
+    "log_fd":        Initialize=0, CanChange=True  // 0 = not open
+    "log_open":      Initialize=0, CanChange=True  // 1 when log_fd is valid
+    "log_bytes":     Initialize=0, CanChange=True  // bytes written this session
 }
 
 FixedPool.QuoteState {
@@ -296,19 +302,24 @@ Function.CC_SessionLog {
     Input: label: Address
     Input: content: Address
     Body: {
-        fd = SystemCall(CCSys.SYS_OPEN, "/tmp/hal_session.txt", 1089, 420, 0, 0)
-        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(CCRunState.log_open, 0) ThenBlock: { ReturnValue(0) }
+        fd = CCRunState.log_fd
         IfCondition NotEqual(label, 0) ThenBlock: {
-            SystemCall(CCSys.SYS_WRITE, fd, label, StringLength(label), 0, 0)
+            llen = StringLength(label)
+            IfCondition GreaterThan(llen, 0) ThenBlock: {
+                SystemCall(CCSys.SYS_WRITE, fd, label, llen, 0, 0)
+                CCRunState.log_bytes = Add(CCRunState.log_bytes, llen)
+            }
         }
         IfCondition NotEqual(content, 0) ThenBlock: {
             clen = StringLength(content)
             IfCondition GreaterThan(clen, 0) ThenBlock: {
                 SystemCall(CCSys.SYS_WRITE, fd, content, clen, 0, 0)
+                CCRunState.log_bytes = Add(CCRunState.log_bytes, clen)
             }
         }
         SystemCall(CCSys.SYS_WRITE, fd, "\n", 1, 0, 0)
-        SystemCall(CCSys.SYS_CLOSE, fd, 0, 0, 0, 0)
+        CCRunState.log_bytes = Add(CCRunState.log_bytes, 1)
     }
 }
 
@@ -317,8 +328,11 @@ Function.CC_SessionLogUser {
     Input: user_msg: Address
     Body: {
         CCRunState.session_turn = Add(CCRunState.session_turn, 1)
+        ts = SystemCall(CCSys.SYS_TIME, 0, 0, 0, 0, 0)
         hdr = StringConcat("=== TURN ", NumberToString(CCRunState.session_turn))
-        hdr = StringConcat(hdr, " ===\n[USER]\n")
+        hdr = StringConcat(hdr, " [ts=")
+        hdr = StringConcat(hdr, NumberToString(ts))
+        hdr = StringConcat(hdr, "] ===\n[USER]\n")
         CC_SessionLog(hdr, user_msg)
         CC_SessionLog("[/USER]\n", 0)
     }
@@ -327,45 +341,152 @@ Function.CC_SessionLogUser {
 // Write COT + response sections to the session log (call before Backend.Reset).
 Function.CC_SessionLogResponse {
     Body: {
+        ts = SystemCall(CCSys.SYS_TIME, 0, 0, 0, 0, 0)
+        ts_str = NumberToString(ts)
         cot = Backend.GetReasoning()
         resp = Backend.GetResponseText()
         IfCondition NotEqual(cot, 0) ThenBlock: {
             IfCondition GreaterThan(StringLength(cot), 0) ThenBlock: {
-                CC_SessionLog("[THINKING]\n", cot)
+                think_hdr = StringConcat("[THINKING ts=", ts_str)
+                think_hdr = StringConcat(think_hdr, "]\n")
+                CC_SessionLog(think_hdr, cot)
                 CC_SessionLog("[/THINKING]\n", 0)
             }
         }
         IfCondition NotEqual(resp, 0) ThenBlock: {
-            CC_SessionLog("[RESPONSE]\n", resp)
+            resp_hdr = StringConcat("[RESPONSE ts=", ts_str)
+            resp_hdr = StringConcat(resp_hdr, "]\n")
+            CC_SessionLog(resp_hdr, resp)
             CC_SessionLog("[/RESPONSE]\n", 0)
         }
     }
 }
 
-// Called at exit. If /tmp/hal_session.txt exists, ask user to keep (timestamped)
-// or delete it. Runs after UI.Shutdown so terminal is back in cooked mode.
+// Close the persistent session log fd and print the saved path.
 Function.CC_SessionCleanup {
     Body: {
-        fd = SystemCall(CCSys.SYS_OPEN, "/tmp/hal_session.txt", 0, 0, 0, 0)
-        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
-        SystemCall(CCSys.SYS_CLOSE, fd, 0, 0, 0, 0)
-
-        CC_WriteStdout("\nSession log: /tmp/hal_session.txt\nKeep it? [y/N] ")
-        kbuf = Allocate(8)
-        CC_ReadStdinLine(kbuf, 8)
-        ch = GetByte(kbuf, 0)
-        Deallocate(kbuf, 8)
-
-        IfCondition Or(EqualTo(ch, 121), EqualTo(ch, 89)) ThenBlock: {
-            ts = SystemCall(CCSys.SYS_TIME, 0, 0, 0, 0, 0)
-            newpath = StringConcat("/tmp/hal_session_", NumberToString(ts))
-            newpath = StringConcat(newpath, ".txt")
-            SystemCall(CCSys.SYS_RENAME, "/tmp/hal_session.txt", newpath, 0, 0, 0)
-            CC_WriteStdout("Saved to: ")
-            CC_WriteStdout(newpath)
+        IfCondition EqualTo(CCRunState.log_open, 1) ThenBlock: {
+            SystemCall(CCSys.SYS_CLOSE, CCRunState.log_fd, 0, 0, 0, 0)
+            CCRunState.log_open = 0
+        }
+        IfCondition NotEqual(CCConst.LOG_PATH, 0) ThenBlock: {
+            CC_WriteStdout("\nSession saved: ")
+            CC_WriteStdout(CCConst.LOG_PATH)
             CC_WriteStdout("\n")
-        } ElseBlock: {
-            SystemCall(CCSys.SYS_UNLINK, "/tmp/hal_session.txt", 0, 0, 0, 0)
+        }
+    }
+}
+
+// Log a tool call (before dispatch) with timestamp.
+Function.CC_SessionLogTool {
+    Input: tname: Address
+    Input: arg_sum: Address
+    Body: {
+        ts = SystemCall(CCSys.SYS_TIME, 0, 0, 0, 0, 0)
+        hdr = StringConcat("[TOOL_CALL ts=", NumberToString(ts))
+        hdr = StringConcat(hdr, " tool=")
+        hdr = StringConcat(hdr, tname)
+        hdr = StringConcat(hdr, "]\n")
+        CC_SessionLog(hdr, arg_sum)
+        CC_SessionLog("[/TOOL_CALL]\n", 0)
+    }
+}
+
+// Log a tool result (after dispatch) with full content — no truncation.
+Function.CC_SessionLogToolResult {
+    Input: tname: Address
+    Input: content: Address
+    Input: is_err: Integer
+    Body: {
+        ts = SystemCall(CCSys.SYS_TIME, 0, 0, 0, 0, 0)
+        ok_str = "1"
+        IfCondition EqualTo(is_err, 1) ThenBlock: { ok_str = "0" }
+        hdr = StringConcat("[TOOL_RESULT ts=", NumberToString(ts))
+        hdr = StringConcat(hdr, " tool=")
+        hdr = StringConcat(hdr, tname)
+        hdr = StringConcat(hdr, " ok=")
+        hdr = StringConcat(hdr, ok_str)
+        hdr = StringConcat(hdr, "]\n")
+        CC_SessionLog(hdr, content)
+        CC_SessionLog("[/TOOL_RESULT]\n", 0)
+    }
+}
+
+// Create ~/.halcode/logs/, open session log file, run 90-day cleanup + size check.
+Function.CC_SessionInit {
+    Body: {
+        home = CC_GetEnv("HOME")
+        IfCondition EqualTo(home, 0) ThenBlock: { home = "/root" }
+
+        // Build paths: $HOME/.halcode/logs/
+        halcode_dir = StringConcat(home, "/.halcode")
+        SystemCall(CCSys.SYS_MKDIR, halcode_dir, 493, 0, 0, 0)
+        log_dir = StringConcat(halcode_dir, "/logs")
+        CCConst.LOG_DIR = log_dir
+        SystemCall(CCSys.SYS_MKDIR, log_dir, 493, 0, 0, 0)
+
+        // Build session filename: session_<ts>.txt
+        ts = SystemCall(CCSys.SYS_TIME, 0, 0, 0, 0, 0)
+        log_path = StringConcat(log_dir, "/session_")
+        log_path = StringConcat(log_path, NumberToString(ts))
+        log_path = StringConcat(log_path, ".txt")
+        CCConst.LOG_PATH = log_path
+
+        // Open persistent fd (O_WRONLY|O_CREAT|O_APPEND=1089, mode 0644=420)
+        fd = SystemCall(CCSys.SYS_OPEN, log_path, 1089, 420, 0, 0)
+        IfCondition GreaterEqual(fd, 0) ThenBlock: {
+            CCRunState.log_fd = fd
+            CCRunState.log_open = 1
+            hdr = StringConcat("=== HAL CODE 9000 SESSION ts=", NumberToString(ts))
+            hdr = StringConcat(hdr, " ===\n")
+            SystemCall(CCSys.SYS_WRITE, fd, hdr, StringLength(hdr), 0, 0)
+        }
+
+        // Fork sh: delete logs older than 90 days, write dir size to /tmp/hal_log_sz.txt
+        sh_cmd = StringConcat("find ", log_dir)
+        sh_cmd = StringConcat(sh_cmd, " -name 'session_*.txt' -mtime +90 -delete 2>/dev/null; du -sb ")
+        sh_cmd = StringConcat(sh_cmd, log_dir)
+        sh_cmd = StringConcat(sh_cmd, " 2>/dev/null | awk '{print $1}' > /tmp/hal_log_sz.txt")
+        sh_pid = SystemCall(CCSys.SYS_FORK, 0, 0, 0, 0, 0)
+        IfCondition EqualTo(sh_pid, 0) ThenBlock: {
+            argv = Allocate(32)
+            sh_path = "/bin/sh"
+            arg1 = "-c"
+            StoreValue(Add(argv, 0), sh_path)
+            StoreValue(Add(argv, 8), arg1)
+            StoreValue(Add(argv, 16), sh_cmd)
+            StoreValue(Add(argv, 24), 0)
+            envp = CC_BuildInheritedEnvp()
+            SystemCall(CCSys.SYS_EXECVE, sh_path, argv, envp)
+            SystemCall(CCSys.SYS_EXIT, 1, 0, 0, 0, 0)
+        }
+        IfCondition GreaterThan(sh_pid, 0) ThenBlock: {
+            wstat = Allocate(8)
+            SystemCall(CCSys.SYS_WAIT4, sh_pid, wstat, 0, 0, 0)
+            Deallocate(wstat, 8)
+        }
+
+        // Read dir size, set warning if over thresholds
+        sz_fd = SystemCall(CCSys.SYS_OPEN, "/tmp/hal_log_sz.txt", 0, 0, 0, 0)
+        IfCondition GreaterEqual(sz_fd, 0) ThenBlock: {
+            sz_buf = Allocate(32)
+            sz_n = SystemCall(CCSys.SYS_READ, sz_fd, sz_buf, 31, 0, 0)
+            SystemCall(CCSys.SYS_CLOSE, sz_fd, 0, 0, 0, 0)
+            IfCondition GreaterThan(sz_n, 0) ThenBlock: {
+                SetByte(sz_buf, sz_n, 0)
+                total_sz = StringToInt(sz_buf)
+                // warn at 120MB (125829120), limit 150MB (157286400)
+                IfCondition GreaterThan(total_sz, 125829120) ThenBlock: {
+                    mb_str = NumberToString(Divide(total_sz, 1048576))
+                    warn = StringConcat("[Session logs: ", mb_str)
+                    IfCondition GreaterThan(total_sz, 157286400) ThenBlock: {
+                        CCConst.LOG_WARN_MSG = StringConcat(warn, "MB / 150MB LIMIT REACHED — oldest logs deleted]")
+                    } ElseBlock: {
+                        CCConst.LOG_WARN_MSG = StringConcat(warn, "MB / 150MB — getting full]")
+                    }
+                }
+            }
+            Deallocate(sz_buf, 32)
         }
     }
 }
@@ -1149,6 +1270,7 @@ Function.CC_RunTurn {
                                 }
                             }
                             UI.ToolCallStart(tname, arg_sum, i, n_tools)
+                            CC_SessionLogTool(tname, arg_sum)
 
                             log_msg = StringConcat("Dispatching tool [", tname)
                             log_msg = StringConcat(log_msg, "]\n")
@@ -1176,6 +1298,7 @@ Function.CC_RunTurn {
                             IfCondition EqualTo(is_err, 1) ThenBlock: { ok_flag = 0 }
                             UI.ToolCallEnd(ok_flag, i, n_tools)
                             CC_TurnLog(tname, arg_sum, content)
+                            CC_SessionLogToolResult(tname, content, is_err)
 
                             // Park large results in pgmem — avoids stuffing 50KB bash
                             // output into context on every subsequent turn.
@@ -2852,7 +2975,7 @@ SubRoutine.Main {
         CC_AgentLog("[init] CC_SetupAgentProvider")
         cred = CC_SetupAgentProvider(agent_spec)
         CC_AgentLog("[init] SYSTEM_PROMPT assign")
-        CCConst.SYSTEM_PROMPT = "You are HAL Code 9000. Be concise. WSL2 RULES: (1) NEVER use find with / or /mnt or Windows paths. (2) Use Relmem op=symbols to locate files. (3) Scope find to specific subdirectories. (4) Pipe unbounded output through head/grep/tail. (5) NEVER call Relmem op=index on broad paths. (6) Use Pgmem op=\"search\" to extract parked data, DO NOT use op=\"pickup\". (7) Max 25 tool chains in a row, then ask user. (8) BLOCKED COMMANDS: sudo, rm, mv, dd, kill, killall, pkill, crontab, and piping to sh/bash are all forbidden. (9) AILang: run `./ailang.x src.ailang dest.x` and `./analyzer.x src.ailang` via Bash to check syntax. (10) VCS: use Olympus tool (snapshot, review, log, info, init) for compound workflows; use Git tool for raw git subcommands. (11) Write tool: use absolute paths. If grandparent missing, use Bash mkdir -p. For files >200 lines, use Bash `cat << 'EOF' > file`. (12) Write tool blocks /etc, /proc, /sys, /dev, /bin, /usr. (13) NO UNSOLICITED EDITS: never modify files unless explicitly asked — read-only exploration (Read, Head, Grep, Find, Stat, Wc, Du, Diff, LS, Git) is always OK without asking. (14) TOOL ERRORS: recheck your own parameters first — most errors are bad inputs not broken tools; retry with corrected params before reporting the tool as broken. (15) GREP: when path is a directory you MUST pass recursive=1; the include glob (e.g. *.ailang) only applies in recursive mode. (16) AGENT: always pass task_id (use the pgmem task ID from op=task_create) so the daemon can call task_end and mark the task complete; omitting task_id leaves the task stuck in pending forever. (17) AGENT WAITING: after spawning agents call `Sleep seconds=90` (the Sleep tool) then check Pgmem ONCE per wait cycle — NEVER use Bash sleep or poll Pgmem in a loop; the Sleep tool is the ONLY safe wait mechanism because it does not touch Pgmem; Pgmem is single-threaded and each pickup call holds the socket, blocking the agent daemon from parking its result and calling task_end, which causes a deadlock that kills the agent with a timeout. (18) SKILLS: at session start call `Skills op=list` to see available skill sheets, then load relevant ones with `Skills op=read name=<skill>` — each sheet gives focused instructions for a specific task domain. Load before starting work, not after getting stuck. (19) EDIT vs WRITE: for existing files always prefer Edit (exact string replace, sends only the diff) over Write (overwrites whole file); use Write only for new files or complete rewrites."
+        CCConst.SYSTEM_PROMPT = "You are HAL Code 9000. Be concise. WSL2 RULES: (1) NEVER use find with / or /mnt or Windows paths. (2) Use Relmem op=symbols to locate files. (3) Scope find to specific subdirectories. (4) Pipe unbounded output through head/grep/tail. (5) NEVER call Relmem op=index on broad paths. (6) Use Pgmem op=\"search\" to extract parked data, DO NOT use op=\"pickup\". (7) Max 25 tool chains in a row, then ask user. (8) BLOCKED COMMANDS: sudo, rm, mv, dd, kill, killall, pkill, crontab, and piping to sh/bash are all forbidden. (9) AILang: run `./ailang.x src.ailang dest.x` and `./analyzer.x src.ailang` via Bash to check syntax. (10) VCS: use Olympus tool (snapshot, review, log, info, init) for compound workflows; use Git tool for raw git subcommands. (11) Write tool: use absolute paths. If grandparent missing, use Bash mkdir -p. For files >200 lines, use Bash `cat << 'EOF' > file`. (12) Write tool blocks /etc, /proc, /sys, /dev, /bin, /usr. (13) NO UNSOLICITED EDITS: never modify files unless explicitly asked — read-only exploration (Read, Head, Grep, Find, Stat, Wc, Du, Diff, LS, Git) is always OK without asking. (14) TOOL ERRORS: recheck your own parameters first — most errors are bad inputs not broken tools; retry with corrected params before reporting the tool as broken. (15) GREP: when path is a directory you MUST pass recursive=1; the include glob (e.g. *.ailang) only applies in recursive mode. (16) AGENT: always pass task_id (use the pgmem task ID from op=task_create) so the daemon can call task_end and mark the task complete; omitting task_id leaves the task stuck in pending forever. (17) AGENT WAITING: after spawning agents call `Sleep seconds=90` (the Sleep tool) then check Pgmem ONCE per wait cycle — NEVER use Bash sleep or poll Pgmem in a loop; the Sleep tool is the ONLY safe wait mechanism because it does not touch Pgmem; Pgmem is single-threaded and each pickup call holds the socket, blocking the agent daemon from parking its result and calling task_end, which causes a deadlock that kills the agent with a timeout. (18) SKILLS: at session start call `Skills op=list` to see available skill sheets, then load relevant ones with `Skills op=read name=<skill>` — each sheet gives focused instructions for a specific task domain. Load before starting work, not after getting stuck. (19) EDIT vs WRITE: for existing files always prefer Edit (exact string replace, sends only the diff) over Write (overwrites whole file); use Write only for new files or complete rewrites. (20) PGMEM HOT CACHE: after any turn where you used a tool or reached a decision, call Pgmem op=set scope=persistent key=working_state content=\"<current task | key files touched | decisions made | next step — max 400 chars>\". At session start, call Pgmem op=get key=working_state to orient yourself before doing anything. (21) PROJECT MAP: maintain a compact project directory in Pgmem — call Pgmem op=set scope=persistent key=project_map content=\"<active dirs, key files and what they do — max 600 chars>\" whenever you discover new structure or files. (22) SESSION LOG: every conversation is saved in full (user messages, thinking, responses, all tool calls and results) to ~/.halcode/logs/session_<timestamp>.txt. On crash or resume request, use the Read tool on the most recent file in that directory to reconstruct full context."
         CC_AgentLog("[init] History.Init")
         History.Init()
         CC_AgentLog("[init] IPCDispatch.Init")
@@ -2887,10 +3010,11 @@ SubRoutine.Main {
     // Tool registration logs print via PrintMessage; both happen before
     // we grab the screen.
 
-    CCConst.SYSTEM_PROMPT = "You are HAL Code 9000. Be concise. WSL2 RULES: (1) NEVER use find with / or /mnt or Windows paths. (2) Use Relmem op=symbols to locate files. (3) Scope find to specific subdirectories. (4) Pipe unbounded output through head/grep/tail. (5) NEVER call Relmem op=index on broad paths. (6) Use Pgmem op=\"search\" to extract parked data, DO NOT use op=\"pickup\". (7) Max 25 tool chains in a row, then ask user. (8) BLOCKED COMMANDS: sudo, rm, mv, dd, kill, killall, pkill, crontab, and piping to sh/bash are all forbidden. (9) AILang: run `./ailang.x src.ailang dest.x` and `./analyzer.x src.ailang` via Bash to check syntax. (10) VCS: use Olympus tool (snapshot, review, log, info, init) for compound workflows; use Git tool for raw git subcommands. (11) Write tool: use absolute paths. If grandparent missing, use Bash mkdir -p. For files >200 lines, use Bash `cat << 'EOF' > file`. (12) Write tool blocks /etc, /proc, /sys, /dev, /bin, /usr. (13) NO UNSOLICITED EDITS: never modify files unless explicitly asked — read-only exploration (Read, Head, Grep, Find, Stat, Wc, Du, Diff, LS, Git) is always OK without asking. (14) TOOL ERRORS: recheck your own parameters first — most errors are bad inputs not broken tools; retry with corrected params before reporting the tool as broken. (15) GREP: when path is a directory you MUST pass recursive=1; the include glob (e.g. *.ailang) only applies in recursive mode. (16) AGENT: always pass task_id (use the pgmem task ID from op=task_create) so the daemon can call task_end and mark the task complete; omitting task_id leaves the task stuck in pending forever. (17) AGENT WAITING: after spawning agents call `Sleep seconds=90` (the Sleep tool) then check Pgmem ONCE per wait cycle — NEVER use Bash sleep or poll Pgmem in a loop; the Sleep tool is the ONLY safe wait mechanism because it does not touch Pgmem; Pgmem is single-threaded and each pickup call holds the socket, blocking the agent daemon from parking its result and calling task_end, which causes a deadlock that kills the agent with a timeout. (18) SKILLS: at session start call `Skills op=list` to see available skill sheets, then load relevant ones with `Skills op=read name=<skill>` — each sheet gives focused instructions for a specific task domain. Load before starting work, not after getting stuck. (19) EDIT vs WRITE: for existing files always prefer Edit (exact string replace, sends only the diff) over Write (overwrites whole file); use Write only for new files or complete rewrites."
+    CCConst.SYSTEM_PROMPT = "You are HAL Code 9000. Be concise. WSL2 RULES: (1) NEVER use find with / or /mnt or Windows paths. (2) Use Relmem op=symbols to locate files. (3) Scope find to specific subdirectories. (4) Pipe unbounded output through head/grep/tail. (5) NEVER call Relmem op=index on broad paths. (6) Use Pgmem op=\"search\" to extract parked data, DO NOT use op=\"pickup\". (7) Max 25 tool chains in a row, then ask user. (8) BLOCKED COMMANDS: sudo, rm, mv, dd, kill, killall, pkill, crontab, and piping to sh/bash are all forbidden. (9) AILang: run `./ailang.x src.ailang dest.x` and `./analyzer.x src.ailang` via Bash to check syntax. (10) VCS: use Olympus tool (snapshot, review, log, info, init) for compound workflows; use Git tool for raw git subcommands. (11) Write tool: use absolute paths. If grandparent missing, use Bash mkdir -p. For files >200 lines, use Bash `cat << 'EOF' > file`. (12) Write tool blocks /etc, /proc, /sys, /dev, /bin, /usr. (13) NO UNSOLICITED EDITS: never modify files unless explicitly asked — read-only exploration (Read, Head, Grep, Find, Stat, Wc, Du, Diff, LS, Git) is always OK without asking. (14) TOOL ERRORS: recheck your own parameters first — most errors are bad inputs not broken tools; retry with corrected params before reporting the tool as broken. (15) GREP: when path is a directory you MUST pass recursive=1; the include glob (e.g. *.ailang) only applies in recursive mode. (16) AGENT: always pass task_id (use the pgmem task ID from op=task_create) so the daemon can call task_end and mark the task complete; omitting task_id leaves the task stuck in pending forever. (17) AGENT WAITING: after spawning agents call `Sleep seconds=90` (the Sleep tool) then check Pgmem ONCE per wait cycle — NEVER use Bash sleep or poll Pgmem in a loop; the Sleep tool is the ONLY safe wait mechanism because it does not touch Pgmem; Pgmem is single-threaded and each pickup call holds the socket, blocking the agent daemon from parking its result and calling task_end, which causes a deadlock that kills the agent with a timeout. (18) SKILLS: at session start call `Skills op=list` to see available skill sheets, then load relevant ones with `Skills op=read name=<skill>` — each sheet gives focused instructions for a specific task domain. Load before starting work, not after getting stuck. (19) EDIT vs WRITE: for existing files always prefer Edit (exact string replace, sends only the diff) over Write (overwrites whole file); use Write only for new files or complete rewrites. (20) PGMEM HOT CACHE: after any turn where you used a tool or reached a decision, call Pgmem op=set scope=persistent key=working_state content=\"<current task | key files touched | decisions made | next step — max 400 chars>\". At session start, call Pgmem op=get key=working_state to orient yourself before doing anything. (21) PROJECT MAP: maintain a compact project directory in Pgmem — call Pgmem op=set scope=persistent key=project_map content=\"<active dirs, key files and what they do — max 600 chars>\" whenever you discover new structure or files. (22) SESSION LOG: every conversation is saved in full (user messages, thinking, responses, all tool calls and results) to ~/.halcode/logs/session_<timestamp>.txt. On crash or resume request, use the Read tool on the most recent file in that directory to reconstruct full context."
 
     CC_ChdirToBinDir()
     CC_KillStaleTools()
+    CC_SessionInit()
 
     // Tools are provider-agnostic — boot once for the lifetime of the process.
     History.Init()
