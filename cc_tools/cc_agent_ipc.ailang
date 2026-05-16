@@ -126,7 +126,8 @@ Function.Agent_CallPgmem {
         IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
         rc = Socket.ConnectUnix(fd, "@halcode/Pgmem")
         IfCondition LessThan(rc, 0) ThenBlock: { Socket.Close(fd) ReturnValue(0) }
-        
+        Socket.SetRecvTimeout(fd, 30000)
+
         wrap = JSON.NewObject()
         JSON.SetString(wrap, "method", "call")
         JSON.SetString(wrap, "id", "agent_internal")
@@ -288,8 +289,12 @@ Function.Agent_HandleRequest {
                 JSON.SetString(park_req, "kind", "tool_result")
                 JSON.SetString(park_req, "content", out_content)
                 JSON.SetString(park_req, "scope", "project")
-                Agent_CallPgmem(park_req)
-                Agent_LogMsg(log_path, "[daemon] park sent")
+                park_resp = Agent_CallPgmem(park_req)
+                IfCondition EqualTo(park_resp, 0) ThenBlock: {
+                    Agent_LogMsg(log_path, "[daemon] WARNING: park call returned null (pgmem timeout or unavailable)")
+                } ElseBlock: {
+                    Agent_LogMsg(log_path, "[daemon] park ok")
+                }
 
                 // Write flag file so HalCode9000 main loop can show a notification.
                 notify_fd = SystemCall(AgentSys.SYS_OPEN, "/tmp/hal_agent_notify.txt", 577, 420, 0, 0)
@@ -311,8 +316,12 @@ Function.Agent_HandleRequest {
                     JSON.SetString(end_req, "task_id", t_id)
                     JSON.SetString(end_req, "status", "complete")
                     JSON.SetString(end_req, "result_key", r_key)
-                    Agent_CallPgmem(end_req)
-                    Agent_LogMsg(log_path, "[daemon] task_end sent")
+                    end_resp = Agent_CallPgmem(end_req)
+                    IfCondition EqualTo(end_resp, 0) ThenBlock: {
+                        Agent_LogMsg(log_path, "[daemon] WARNING: task_end call returned null (pgmem timeout or unavailable)")
+                    } ElseBlock: {
+                        Agent_LogMsg(log_path, "[daemon] task_end ok")
+                    }
                 }
 
                 Agent_LogMsg(log_path, "[daemon] done, cleaning up")

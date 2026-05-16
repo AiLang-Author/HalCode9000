@@ -172,7 +172,6 @@ Function.Gemini.BuildHeaders {
 }
 
 
-// --- REPLACE YOUR EXISTING BuildRequest WITH THIS ---
 Function.Gemini.BuildRequest {
     Input: messages_arr: Address
     Input: tools_arr: Address
@@ -259,14 +258,11 @@ Function.Gemini.BuildRequest {
     }
 }
 
-// --- REPLACE YOUR EXISTING OnEvent WITH THIS ---
 Function.Gemini.OnEvent {
     Input: event_type: Address
     Input: event_data: Address
     Output: Integer
     Body: {
-        // [FIX] Blocking disk I/O has been removed to prevent TCP timeouts.
-        
         IfCondition EqualTo(StringCompare(event_data, "[DONE]"), 0) ThenBlock: {
             IfCondition EqualTo(GEMINIState.has_tools_flag, 1) ThenBlock: {
                 ReturnValue(GEMINISignal.TURN_DONE_WITH_TOOLS)
@@ -463,101 +459,6 @@ Function.Gemini_ParseToolCallDelta {
                 }
             }
         }
-    }
-}
-
-Function.Gemini.OnEvent {
-    Input: event_type: Address
-    Input: event_data: Address
-    Output: Integer
-    Body: {
-        dbg_fd = SystemCall(2, "/tmp/gemini_debug.log",
-                            BitwiseOr(BitwiseOr(1, 64), 512), 420, 0, 0)
-        IfCondition GreaterEqual(dbg_fd, 0) ThenBlock: {
-            dlen = StringLength(event_data)
-            IfCondition GreaterThan(dlen, 80) ThenBlock: { dlen = 80 }
-            SystemCall(1, dbg_fd, event_data, dlen, 0, 0)
-            SystemCall(1, dbg_fd, "\n", 1, 0, 0)
-            SystemCall(3, dbg_fd, 0, 0, 0, 0)
-        }
-
-        IfCondition EqualTo(StringCompare(event_data, "[DONE]"), 0) ThenBlock: {
-            IfCondition EqualTo(GEMINIState.has_tools_flag, 1) ThenBlock: {
-                ReturnValue(GEMINISignal.TURN_DONE_WITH_TOOLS)
-            } ElseBlock: {
-                ReturnValue(GEMINISignal.TURN_DONE_NO_TOOLS)
-            }
-        }
-
-        obj = JSON.AsObject(ParseJSON(event_data))
-        IfCondition EqualTo(obj, 0) ThenBlock: {
-            ReturnValue(GEMINISignal.CONTINUE)
-        }
-
-        usage = JSON.GetObject(obj, "usage")
-        IfCondition NotEqual(usage, 0) ThenBlock: {
-            GEMINIState.last_input_tokens = JSON.GetNumber(usage, "prompt_tokens")
-            GEMINIState.last_output_tokens = JSON.GetNumber(usage, "completion_tokens")
-        }
-
-        choices = JSON.GetArray(obj, "choices")
-        IfCondition NotEqual(choices, 0) ThenBlock: {
-            c_len = JSON.ArrayLength(choices)
-            IfCondition GreaterThan(c_len, 0) ThenBlock: {
-                c0_tag = JSON.ArrayGet(choices, 0)
-                c0 = JSON.AsObject(c0_tag)
-
-                fr = JSON.GetString(c0, "finish_reason")
-                IfCondition EqualTo(fr, 0) ThenBlock: {
-                    fr = JSON.GetString(c0, "finishReason") // Gemini camelCase quirk
-                }
-                IfCondition NotEqual(fr, 0) ThenBlock: {
-                    IfCondition Or(EqualTo(StringCompare(fr, "tool_calls"), 0), EqualTo(StringCompare(fr, "TOOL_CALLS"), 0)) ThenBlock: {
-                        GEMINIState.has_tools_flag = 1
-                    }
-                    IfCondition Or(EqualTo(StringCompare(fr, "stop"), 0), EqualTo(StringCompare(fr, "STOP"), 0)) ThenBlock: {
-                        GEMINIState.has_stop_flag = 1
-                    }
-                }
-
-                delta = JSON.GetObject(c0, "delta")
-                IfCondition NotEqual(delta, 0) ThenBlock: {
-                    content = JSON.GetString(delta, "content")
-                    IfCondition NotEqual(content, 0) ThenBlock: {
-                        clen = StringLength(content)
-                        IfCondition GreaterThan(clen, 0) ThenBlock: {
-                            i = 0
-                            used = GEMINIState.text_used
-                            WhileLoop LessThan(i, clen) {
-                                IfCondition LessThan(used, Subtract(GEMINIConst.TEXT_BUF_SZ, 1)) ThenBlock: {
-                                    SetByte(GEMINIState.text_buf, used, GetByte(content, i))
-                                    used = Add(used, 1)
-                                }
-                                i = Add(i, 1)
-                            }
-                            SetByte(GEMINIState.text_buf, used, 0)
-                            GEMINIState.text_used = used
-
-                            UI.ChatPrint(content)
-                        }
-                    }
-
-                    tcs = JSON.GetArray(delta, "tool_calls")
-                    IfCondition NotEqual(tcs, 0) ThenBlock: {
-                        tlen = JSON.ArrayLength(tcs)
-                        j = 0
-                        WhileLoop LessThan(j, tlen) {
-                            tc_tag = JSON.ArrayGet(tcs, j)
-                            tc_obj = JSON.AsObject(tc_tag)
-                            Gemini_ParseToolCallDelta(tc_obj)
-                            j = Add(j, 1)
-                        }
-                    }
-                }
-            }
-        }
-
-        ReturnValue(GEMINISignal.CONTINUE)
     }
 }
 

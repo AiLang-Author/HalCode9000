@@ -1,5 +1,24 @@
 # Project Memory
 
+## Session 2026-05-29 — Skills system + MCP registration
+
+### What was built
+- **`cc_tools/cc_skills_ipc.ailang`** — new Skills tool. `op=list` finds both `skill-name/SKILL.md` dirs and flat `skill-name.md` files. `op=read name=<n>` tries directory format first, falls back to flat. Name/socket taken from argv[1]/argv[2] (passed by CC_LaunchTool), not hardcoded.
+- **`CC_LaunchTool`** updated — now accepts `tool_name` + `tool_socket` params and passes them as argv[1]/argv[2] to all tool binaries. Old tools ignore them safely.
+- **`build.sh`** updated — added loop for `stat`, `wc`, `du`, `diff`, `olympus`, `sleep`, `skills`.
+- **System prompt rule (18)** — "at session start call `Skills op=list`, load relevant sheets with `Skills op=read name=<skill>`."
+- **`~/.halcode/skills/ailang-dev/SKILL.md`** — starter skill covering AILang patterns, syscall table, WSL2 rules, build commands.
+- **Anthropic skills repo** cloned at `skills/` subdirectory — `skills/skills/*/SKILL.md` format confirmed.
+- **Symlink fixed**: `AILangSH/Applications/HalCode9000` → `Documents/HalCode9000`.
+- **MCP registered** user-scope: `claude mcp add -s user halcode9000 -- .../HalCode9000.x --mcp`
+
+### Next priorities
+- **Improve skill quality** — the prompts are rough; DeepSeek over-generates and wanders without tight skill sheets. Each skill needs: clear trigger conditions, strict output format, explicit stop conditions.
+- **DeepSeek control** — add a `deepseek` skill sheet that sets tone/format rules for DS specifically (concise, no preamble, stop after task complete, max tool chains).
+- **Soul/identity system** — SOUL.md + pgmem-backed framework rows (`type='soul_framework'`). Design is settled, not yet built.
+- **cc_skills_ipc not yet compiled at time of restart** — run `./build.sh --tools-only` from AILangSH after restart to get `cc_skills_ipc.x`.
+- **Skills dir to populate**: `~/.halcode/skills/` — currently only `ailang-dev`. Add `deepseek-agent`, `pgmem-queries`, `wsl-debug` at minimum.
+
 ## Hard Rules
 
 - **NEVER read image files** (PNG, JPG, JPEG, BMP, GIF, ICO, SVG, WebP, TIFF, TGA, TVG, etc.) with the Read tool. This causes crashes. No exceptions.
@@ -283,20 +302,12 @@ Library.JSON's XSHash dropped `tool_calls` when `reasoning_content` was also pre
 
 Both Anthropic and OpenAI backends now call `UI.SetTokens(in, out)` after each turn instead of printing dim text to chat. Anthropic reads `message.usage.input_tokens` from `message_start` event, `usage.output_tokens` from `message_delta` event.
 
-### Relmem (cc_relmem_ipc) — current state and pending redesign
+### Relmem (cc_relmem_ipc)
 
-**Current state (2026-04-30):**
 - Index at `~/.claude/relmem/index.json` (~4MB, already built)
 - Socket: `@halcode/Relmem` (abstract Unix socket, bypasses WSL2 tmpfs)
-- Path guard added to `Op_Index`: rejects `/`, `/mnt`, `/mnt/c*`, `/home` — returns error instead of hanging
-
-**Pending redesign (user-specified):**
-`Op_Index` must be redesigned to **require model interaction** rather than walking the filesystem itself:
-1. **Clear** — drop existing index entries for the project path
-2. **Stash** — model uses Bash to enumerate files (e.g. `find <path> -name "*.ailang" | head -500`); op=index without a `files` param should return instructions for this step
-3. **Grep into results** — op=index with `files=<newline-separated-paths>` processes each listed file using grep-style symbol extraction (not the full AILang AST Walker)
-
-This replaces the recursive `Walker_Walk` entirely. The bespoke `Walker_RecurseDir` / `Walker_ProcessFile` / `Parser_Dispatch` chain stays for now but `Op_Index` should no longer call it. Until redesign is done, the path guard prevents hangs.
+- `Op_Index` uses model-interaction pattern: model enumerates files via Bash `find`, then passes `files=<newline-separated-paths>` to op=index for grep-style symbol extraction. Broad-path guard still in place (rejects `/`, `/mnt`, `/mnt/c*`, `/home`).
+- Use `op=symbols` to query the built index — never `op=index` with broad paths.
 
 ### WSL2 Hard Rules (system prompt rules 1-5)
 
@@ -306,10 +317,6 @@ Encoded in `CCConst.SYSTEM_PROMPT` in `HalCode9000.ailang`:
 3. If using `find`, scope to a specific known subdirectory
 4. Never produce unbounded output — always pipe through `head`/`grep`/`tail`
 5. NEVER `Relmem op=index` with broad paths — index already built, use `op=symbols`
-
-### Known crash: ~1700 output tokens causes death
-
-Observed consistently: model responses that reach approximately 1700 tokens cause a crash/hang. Not a one-time event — reproducible. Likely a history buffer overflow or a per-turn output buffer cap in the streaming path. **Not yet diagnosed or fixed.** Check `CCHistory`, `AgentLoop.ailang` turn buffer, and `TUI_BufferWriteStr` overflow.
 
 ### Bash tool timeout
 

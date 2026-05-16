@@ -585,6 +585,8 @@ Function.CC_LaunchLog {
 
 Function.CC_LaunchTool {
     Input: binary_path: Address
+    Input: tool_name: Address
+    Input: tool_socket: Address
     Output: Integer
     Body: {
         CC_LaunchLog("[launch] BEGIN ")
@@ -616,9 +618,19 @@ Function.CC_LaunchTool {
                 SystemCall(CCSys.SYS_DUP2, devnull, 2, 0, 0, 0)
                 SystemCall(CCSys.SYS_CLOSE, devnull, 0, 0, 0, 0)
             }
-            argv = Allocate(16)
+            // Pass name+socket as argv[1]/argv[2] so tools can self-configure.
+            // Tools that predate this pattern ignore the extra args safely.
+            argv = Allocate(32)
             StoreValue(Add(argv, 0), binary_path)
-            StoreValue(Add(argv, 8), 0)
+            IfCondition And(NotEqual(tool_name, 0), NotEqual(tool_socket, 0)) ThenBlock: {
+                StoreValue(Add(argv, 8),  tool_name)
+                StoreValue(Add(argv, 16), tool_socket)
+                StoreValue(Add(argv, 24), 0)
+            } ElseBlock: {
+                StoreValue(Add(argv, 8),  0)
+                StoreValue(Add(argv, 16), 0)
+                StoreValue(Add(argv, 24), 0)
+            }
             ret = SystemCall(CCSys.SYS_EXECVE, binary_path, argv, envp)
             // execve returned -> failed
             CC_LaunchLog("[launch] CHILD EXECVE_FAILED ret=")
@@ -1883,9 +1895,11 @@ Function.CC_LoadManifest {
                 et = JSON.ArrayGet(tools_arr, j)
                 eo = JSON.AsObject(et)
                 IfCondition NotEqual(eo, 0) ThenBlock: {
-                    bin = JSON.GetString(eo, "binary")
+                    bin  = JSON.GetString(eo, "binary")
+                    tnam = JSON.GetString(eo, "name")
+                    tsoc = JSON.GetString(eo, "socket")
                     IfCondition NotEqual(bin, 0) ThenBlock: {
-                        CC_LaunchTool(bin)
+                        CC_LaunchTool(bin, tnam, tsoc)
                     }
                 }
                 j = Add(j, 1)
@@ -2838,7 +2852,7 @@ SubRoutine.Main {
         CC_AgentLog("[init] CC_SetupAgentProvider")
         cred = CC_SetupAgentProvider(agent_spec)
         CC_AgentLog("[init] SYSTEM_PROMPT assign")
-        CCConst.SYSTEM_PROMPT = "You are HAL Code 9000. Be concise. WSL2 RULES: (1) NEVER use find with / or /mnt or Windows paths. (2) Use Relmem op=symbols to locate files. (3) Scope find to specific subdirectories. (4) Pipe unbounded output through head/grep/tail. (5) NEVER call Relmem op=index on broad paths. (6) Use Pgmem op=\"search\" to extract parked data, DO NOT use op=\"pickup\". (7) Max 25 tool chains in a row, then ask user. (8) BLOCKED COMMANDS: sudo, rm, mv, dd, kill, killall, pkill, crontab, and piping to sh/bash are all forbidden. (9) AILang: run `./ailang.x src.ailang dest.x` and `./analyzer.x src.ailang` via Bash to check syntax. (10) VCS: use Olympus tool (snapshot, review, log, info, init) for compound workflows; use Git tool for raw git subcommands. (11) Write tool: use absolute paths. If grandparent missing, use Bash mkdir -p. For files >200 lines, use Bash `cat << 'EOF' > file`. (12) Write tool blocks /etc, /proc, /sys, /dev, /bin, /usr. (13) NO UNSOLICITED EDITS: never modify files unless explicitly asked — read-only exploration (Read, Head, Grep, Find, Stat, Wc, Du, Diff, LS, Git) is always OK without asking. (14) TOOL ERRORS: recheck your own parameters first — most errors are bad inputs not broken tools; retry with corrected params before reporting the tool as broken. (15) GREP: when path is a directory you MUST pass recursive=1; the include glob (e.g. *.ailang) only applies in recursive mode. (16) AGENT: always pass task_id (use the pgmem task ID from op=task_create) so the daemon can call task_end and mark the task complete; omitting task_id leaves the task stuck in pending forever. (17) AGENT WAITING: after spawning agents call `Sleep seconds=90` (the Sleep tool) then check Pgmem ONCE per wait cycle — NEVER use Bash sleep or poll Pgmem in a loop; the Sleep tool is the ONLY safe wait mechanism because it does not touch Pgmem; Pgmem is single-threaded and each pickup call holds the socket, blocking the agent daemon from parking its result and calling task_end, which causes a deadlock that kills the agent with a timeout."
+        CCConst.SYSTEM_PROMPT = "You are HAL Code 9000. Be concise. WSL2 RULES: (1) NEVER use find with / or /mnt or Windows paths. (2) Use Relmem op=symbols to locate files. (3) Scope find to specific subdirectories. (4) Pipe unbounded output through head/grep/tail. (5) NEVER call Relmem op=index on broad paths. (6) Use Pgmem op=\"search\" to extract parked data, DO NOT use op=\"pickup\". (7) Max 25 tool chains in a row, then ask user. (8) BLOCKED COMMANDS: sudo, rm, mv, dd, kill, killall, pkill, crontab, and piping to sh/bash are all forbidden. (9) AILang: run `./ailang.x src.ailang dest.x` and `./analyzer.x src.ailang` via Bash to check syntax. (10) VCS: use Olympus tool (snapshot, review, log, info, init) for compound workflows; use Git tool for raw git subcommands. (11) Write tool: use absolute paths. If grandparent missing, use Bash mkdir -p. For files >200 lines, use Bash `cat << 'EOF' > file`. (12) Write tool blocks /etc, /proc, /sys, /dev, /bin, /usr. (13) NO UNSOLICITED EDITS: never modify files unless explicitly asked — read-only exploration (Read, Head, Grep, Find, Stat, Wc, Du, Diff, LS, Git) is always OK without asking. (14) TOOL ERRORS: recheck your own parameters first — most errors are bad inputs not broken tools; retry with corrected params before reporting the tool as broken. (15) GREP: when path is a directory you MUST pass recursive=1; the include glob (e.g. *.ailang) only applies in recursive mode. (16) AGENT: always pass task_id (use the pgmem task ID from op=task_create) so the daemon can call task_end and mark the task complete; omitting task_id leaves the task stuck in pending forever. (17) AGENT WAITING: after spawning agents call `Sleep seconds=90` (the Sleep tool) then check Pgmem ONCE per wait cycle — NEVER use Bash sleep or poll Pgmem in a loop; the Sleep tool is the ONLY safe wait mechanism because it does not touch Pgmem; Pgmem is single-threaded and each pickup call holds the socket, blocking the agent daemon from parking its result and calling task_end, which causes a deadlock that kills the agent with a timeout. (18) SKILLS: at session start call `Skills op=list` to see available skill sheets, then load relevant ones with `Skills op=read name=<skill>` — each sheet gives focused instructions for a specific task domain. Load before starting work, not after getting stuck. (19) EDIT vs WRITE: for existing files always prefer Edit (exact string replace, sends only the diff) over Write (overwrites whole file); use Write only for new files or complete rewrites."
         CC_AgentLog("[init] History.Init")
         History.Init()
         CC_AgentLog("[init] IPCDispatch.Init")
@@ -2873,7 +2887,7 @@ SubRoutine.Main {
     // Tool registration logs print via PrintMessage; both happen before
     // we grab the screen.
 
-    CCConst.SYSTEM_PROMPT = "You are HAL Code 9000. Be concise. WSL2 RULES: (1) NEVER use find with / or /mnt or Windows paths. (2) Use Relmem op=symbols to locate files. (3) Scope find to specific subdirectories. (4) Pipe unbounded output through head/grep/tail. (5) NEVER call Relmem op=index on broad paths. (6) Use Pgmem op=\"search\" to extract parked data, DO NOT use op=\"pickup\". (7) Max 25 tool chains in a row, then ask user. (8) BLOCKED COMMANDS: sudo, rm, mv, dd, kill, killall, pkill, crontab, and piping to sh/bash are all forbidden. (9) AILang: run `./ailang.x src.ailang dest.x` and `./analyzer.x src.ailang` via Bash to check syntax. (10) VCS: use Olympus tool (snapshot, review, log, info, init) for compound workflows; use Git tool for raw git subcommands. (11) Write tool: use absolute paths. If grandparent missing, use Bash mkdir -p. For files >200 lines, use Bash `cat << 'EOF' > file`. (12) Write tool blocks /etc, /proc, /sys, /dev, /bin, /usr. (13) NO UNSOLICITED EDITS: never modify files unless explicitly asked — read-only exploration (Read, Head, Grep, Find, Stat, Wc, Du, Diff, LS, Git) is always OK without asking. (14) TOOL ERRORS: recheck your own parameters first — most errors are bad inputs not broken tools; retry with corrected params before reporting the tool as broken. (15) GREP: when path is a directory you MUST pass recursive=1; the include glob (e.g. *.ailang) only applies in recursive mode. (16) AGENT: always pass task_id (use the pgmem task ID from op=task_create) so the daemon can call task_end and mark the task complete; omitting task_id leaves the task stuck in pending forever. (17) AGENT WAITING: after spawning agents call `Sleep seconds=90` (the Sleep tool) then check Pgmem ONCE per wait cycle — NEVER use Bash sleep or poll Pgmem in a loop; the Sleep tool is the ONLY safe wait mechanism because it does not touch Pgmem; Pgmem is single-threaded and each pickup call holds the socket, blocking the agent daemon from parking its result and calling task_end, which causes a deadlock that kills the agent with a timeout."
+    CCConst.SYSTEM_PROMPT = "You are HAL Code 9000. Be concise. WSL2 RULES: (1) NEVER use find with / or /mnt or Windows paths. (2) Use Relmem op=symbols to locate files. (3) Scope find to specific subdirectories. (4) Pipe unbounded output through head/grep/tail. (5) NEVER call Relmem op=index on broad paths. (6) Use Pgmem op=\"search\" to extract parked data, DO NOT use op=\"pickup\". (7) Max 25 tool chains in a row, then ask user. (8) BLOCKED COMMANDS: sudo, rm, mv, dd, kill, killall, pkill, crontab, and piping to sh/bash are all forbidden. (9) AILang: run `./ailang.x src.ailang dest.x` and `./analyzer.x src.ailang` via Bash to check syntax. (10) VCS: use Olympus tool (snapshot, review, log, info, init) for compound workflows; use Git tool for raw git subcommands. (11) Write tool: use absolute paths. If grandparent missing, use Bash mkdir -p. For files >200 lines, use Bash `cat << 'EOF' > file`. (12) Write tool blocks /etc, /proc, /sys, /dev, /bin, /usr. (13) NO UNSOLICITED EDITS: never modify files unless explicitly asked — read-only exploration (Read, Head, Grep, Find, Stat, Wc, Du, Diff, LS, Git) is always OK without asking. (14) TOOL ERRORS: recheck your own parameters first — most errors are bad inputs not broken tools; retry with corrected params before reporting the tool as broken. (15) GREP: when path is a directory you MUST pass recursive=1; the include glob (e.g. *.ailang) only applies in recursive mode. (16) AGENT: always pass task_id (use the pgmem task ID from op=task_create) so the daemon can call task_end and mark the task complete; omitting task_id leaves the task stuck in pending forever. (17) AGENT WAITING: after spawning agents call `Sleep seconds=90` (the Sleep tool) then check Pgmem ONCE per wait cycle — NEVER use Bash sleep or poll Pgmem in a loop; the Sleep tool is the ONLY safe wait mechanism because it does not touch Pgmem; Pgmem is single-threaded and each pickup call holds the socket, blocking the agent daemon from parking its result and calling task_end, which causes a deadlock that kills the agent with a timeout. (18) SKILLS: at session start call `Skills op=list` to see available skill sheets, then load relevant ones with `Skills op=read name=<skill>` — each sheet gives focused instructions for a specific task domain. Load before starting work, not after getting stuck. (19) EDIT vs WRITE: for existing files always prefer Edit (exact string replace, sends only the diff) over Write (overwrites whole file); use Write only for new files or complete rewrites."
 
     CC_ChdirToBinDir()
     CC_KillStaleTools()
