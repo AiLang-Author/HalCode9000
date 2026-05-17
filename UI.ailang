@@ -34,6 +34,7 @@ LibraryImport.Arena
 LibraryImport.StringUtils
 LibraryImport.JSON
 LibraryImport.TUI
+LibraryImport.TuiWidget
 LibraryImport.ANSI
 
 FixedPool.UISys {
@@ -84,6 +85,17 @@ FixedPool.UILayout {
     "input_len_cached":  Initialize=0, CanChange=True  // cache key: last computed len
     "input_cols_cached": Initialize=0, CanChange=True  // cache key: cols at compute time
     "input_lines_cached":Initialize=1, CanChange=True  // cached result
+    "sidebar_w":         Initialize=22
+    "divider_col":       Initialize=23
+    "chat_x":            Initialize=24               // left column of chat pane
+    "chat_w":            Initialize=0, CanChange=True // computed: cols - 23
+    "header_row":        Initialize=1
+    "rule_row":          Initialize=0, CanChange=True // computed: rows - 4
+    "input_row":         Initialize=0, CanChange=True // computed: rows - 3
+    "hint_row":          Initialize=0, CanChange=True // computed: rows - 1
+    "hal_msg_idx":       Initialize=0, CanChange=True
+    "model_str":         Initialize=0, CanChange=True
+    "cwd_str":           Initialize=0, CanChange=True
 }
 
 FixedPool.UIGlyph {
@@ -200,7 +212,7 @@ Function.UI.Init {
         TUI_BufferWriteStr("[H")
         TUI_Refresh()
         UILayout.chat_cursor = UILayout.chat_top
-        UILayout.chat_col = 1
+        UILayout.chat_col = UILayout.chat_x
 
         // Terminal polish via Library.ANSI
         cc_title = "HAL Code 9000"
@@ -208,8 +220,11 @@ Function.UI.Init {
         ANSI.SetCursorShape(ANSICursor.STEADY_BEAM)
         ANSI.BracketedPasteOn()
 
-        // Initial paint of the empty prompt area
+        // Initialize HAL messages and chrome
+        UI_HALMsgs_Init()
         UI_PaintPromptFrame(UI_GetHintText())
+        UI_DrawChrome()
+        UI_DrawHintRow()
         TUI_Refresh()
     }
 }
@@ -230,14 +245,14 @@ Function.UI.ClearChat {
     Body: {
         i = UILayout.chat_top
         WhileLoop LessEqual(i, UILayout.chat_bot) {
-            TUI_MoveTo(i, 1)
+            TUI_MoveTo(i, UILayout.chat_x)
             TUI_BufferChar(27)
-            TUI_BufferWriteStr("[2K")
+            TUI_BufferWriteStr("[K")
             i = Add(i, 1)
         }
         UILayout.chat_cursor = UILayout.chat_top
-        UILayout.chat_col = 1
-        TUI_MoveTo(UILayout.chat_top, 1)
+        UILayout.chat_col = UILayout.chat_x
+        TUI_MoveTo(UILayout.chat_top, UILayout.chat_x)
         TUI_Refresh()
     }
 }
@@ -250,13 +265,20 @@ Function.UI_RecomputeLayout {
         UILayout.cols = TUI_State.screen_width
         IfCondition LessEqual(UILayout.rows, 0) ThenBlock: { UILayout.rows = 24 }
         IfCondition LessEqual(UILayout.cols, 0) ThenBlock: { UILayout.cols = 80 }
-        UILayout.chat_top = 1
+        UILayout.chat_top = 2
         IfCondition LessThan(UILayout.prompt_h, 4) ThenBlock: { UILayout.prompt_h = 4 }
-        UILayout.chat_bot = Subtract(UILayout.rows, UILayout.prompt_h)
-        IfCondition LessThan(UILayout.chat_bot, 1) ThenBlock: { UILayout.chat_bot = 1 }
-        IfCondition LessThan(UILayout.chat_cursor, 1) ThenBlock: { UILayout.chat_cursor = 1 }
+        UILayout.chat_bot = Subtract(UILayout.rows, 5)
+        IfCondition LessThan(UILayout.chat_bot, UILayout.chat_top) ThenBlock: { UILayout.chat_bot = UILayout.chat_top }
+        IfCondition LessThan(UILayout.chat_cursor, UILayout.chat_top) ThenBlock: { UILayout.chat_cursor = UILayout.chat_top }
         IfCondition GreaterThan(UILayout.chat_cursor, UILayout.chat_bot) ThenBlock: {
             UILayout.chat_cursor = UILayout.chat_bot
+        }
+        UILayout.chat_w    = Subtract(UILayout.cols, 23)
+        UILayout.rule_row  = Subtract(UILayout.rows, 4)
+        UILayout.input_row = Subtract(UILayout.rows, 3)
+        UILayout.hint_row  = Subtract(UILayout.rows, 1)
+        IfCondition EqualTo(UILayout.cwd_str, 0) ThenBlock: {
+            UILayout.cwd_str = UI_GetCwd()
         }
     }
 }
@@ -617,15 +639,15 @@ Function.UI_RenderInput {
     }
 }
 
-// Paint the entire prompt frame (top rule, body row prefix, bot rule, hint).
+// Paint the entire prompt frame (rule, body row, bot rule, hint).
 // Leaves cursor at the input position.
 Function.UI_PaintPromptFrame {
     Input: hint: Address
     Body: {
-        UI_PaintTopRule()
+        UI_DrawRuleIdle()
         UI_PaintBodyRow()
         UI_PaintBotRule()
-        UI_PaintHint(hint)
+        UI_DrawHintRow()
         UI_RenderInput(UILayout.input_len)
     }
 }
@@ -685,8 +707,8 @@ Function.UI.ChatPrint {
             IfCondition EqualTo(ch, 10) ThenBlock: {
                 scrolled = UI_AdvanceChatCursor()
                 IfCondition EqualTo(scrolled, 1) ThenBlock: { scrolled_any = 1 }
-                UILayout.chat_col = 1
-                TUI_MoveTo(UILayout.chat_cursor, 1)
+                UILayout.chat_col = UILayout.chat_x
+                TUI_MoveTo(UILayout.chat_cursor, UILayout.chat_x)
             } ElseBlock: {
                 is_start = 0
                 IfCondition LessThan(ch, 128) ThenBlock: { is_start = 1 }
@@ -695,8 +717,8 @@ Function.UI.ChatPrint {
                 IfCondition And(GreaterThan(UILayout.chat_col, UILayout.cols), EqualTo(is_start, 1)) ThenBlock: {
                     scrolled = UI_AdvanceChatCursor()
                     IfCondition EqualTo(scrolled, 1) ThenBlock: { scrolled_any = 1 }
-                    UILayout.chat_col = 1
-                    TUI_MoveTo(UILayout.chat_cursor, 1)
+                    UILayout.chat_col = UILayout.chat_x
+                    TUI_MoveTo(UILayout.chat_cursor, UILayout.chat_x)
                 }
                 tmp = Allocate(2)
                 SetByte(tmp, 0, ch)
@@ -721,7 +743,7 @@ Function.UI.ChatPrintln {
     Body: {
         UI.ChatPrint(s)
         scrolled = UI_AdvanceChatCursor()
-        UILayout.chat_col = 1
+        UILayout.chat_col = UILayout.chat_x
         IfCondition EqualTo(scrolled, 1) ThenBlock: {
             UI_RepaintPromptFrameOnly()
         }
@@ -743,10 +765,10 @@ Function.UI.ChatPrintDim {
 // didn't smash the prompt rows.
 Function.UI_RepaintPromptFrameOnly {
     Body: {
-        UI_PaintTopRule()
+        UI_DrawChrome()
         UI_PaintBodyRow()
         UI_PaintBotRule()
-        UI_PaintHint(UI_GetHintText())
+        UI_DrawHintRow()
         UI_RenderInput(UILayout.input_len)
     }
 }
@@ -759,14 +781,14 @@ Function.UI.ChatTag {
     Input: body: Address
     Input: color: Integer   // TUI fg index
     Body: {
-        TUI_MoveTo(UILayout.chat_cursor, 1)
+        TUI_MoveTo(UILayout.chat_cursor, UILayout.chat_x)
         TUI_SetFG(color)
         IfCondition NotEqual(tag, 0) ThenBlock: { TUI_BufferWriteStr(tag) }
         TUI_ResetColor()
         TUI_BufferWriteStr(" ")
         IfCondition NotEqual(body, 0) ThenBlock: { TUI_BufferWriteStr(body) }
         scrolled = UI_AdvanceChatCursor()
-        UILayout.chat_col = 1
+        UILayout.chat_col = UILayout.chat_x
         IfCondition EqualTo(scrolled, 1) ThenBlock: { UI_RepaintPromptFrameOnly() }
         TUI_Refresh()
     }
@@ -883,12 +905,13 @@ Function.UI.SetState {
         IfCondition EqualTo(state, 1) ThenBlock: {
             UILayout.think_start_ms = UI_GetTimeMs()
             UILayout.think_elapsed_sec = 0
+            UILayout.hal_msg_idx = Modulo(Add(UILayout.hal_msg_idx, 1), 10)
         } ElseBlock: {
             UILayout.active_tool = 0
+            UI_DrawRuleIdle()
         }
-        UI_PaintTopRule()
         UI_PaintBodyRow()
-        UI_PaintHint(UI_GetHintText())
+        UI_DrawHintRow()
         UI_RenderInput(UILayout.input_len)
         UI.TickMascot()
         TUI_Refresh()
@@ -1225,8 +1248,12 @@ Function.UI.AnimTick {
                 IfCondition NotEqual(UILayout.quote_str, 0) ThenBlock: {
                     UILayout.quote_offset = Add(UILayout.quote_offset, 1)
                 }
-                UI_PaintTopRule()
-                UI_PaintHint(UI_GetHintText())
+                IfCondition NotEqual(UILayout.reasoning_str, 0) ThenBlock: {
+                    UI_DrawRuleStreaming(UILayout.reasoning_str)
+                } ElseBlock: {
+                    UI_DrawRuleIdle()
+                }
+                UI_DrawHintRow()
             }
 
             UI_PaintBodyRow()
@@ -1385,7 +1412,7 @@ Function.UI.SessionHeader {
     Body: {
         UI.ChatPrintln("")
 
-        TUI_MoveTo(UILayout.chat_cursor, 1)
+        TUI_MoveTo(UILayout.chat_cursor, UILayout.chat_x)
         UI_TUI_FgRGB(204, 120, 92)
         TUI_BufferWriteStr(" ┌───┐  ")
         TUI_ResetColor()
@@ -1400,7 +1427,7 @@ Function.UI.SessionHeader {
         }
         UI_AdvanceChatCursor()
 
-        TUI_MoveTo(UILayout.chat_cursor, 1)
+        TUI_MoveTo(UILayout.chat_cursor, UILayout.chat_x)
         UI_TUI_FgRGB(204, 120, 92)
         TUI_BufferWriteStr("─┤ ")
         UI_EmitHalEye()
@@ -1414,7 +1441,7 @@ Function.UI.SessionHeader {
         }
         UI_AdvanceChatCursor()
 
-        TUI_MoveTo(UILayout.chat_cursor, 1)
+        TUI_MoveTo(UILayout.chat_cursor, UILayout.chat_x)
         UI_TUI_FgRGB(204, 120, 92)
         TUI_BufferWriteStr(" └───┘   ")
         TUI_ResetColor()
@@ -1430,6 +1457,341 @@ Function.UI.SessionHeader {
         UILayout.mascot_tick = 0
         UI_RepaintPromptFrameOnly()
         TUI_Refresh()
+    }
+}
+
+// =============================================================================
+// CHROME — persistent sidebar, header, and rule row elements
+// =============================================================================
+
+FixedPool.HALMsgs {
+    "m0": Initialize=0, CanChange=True
+    "m1": Initialize=0, CanChange=True
+    "m2": Initialize=0, CanChange=True
+    "m3": Initialize=0, CanChange=True
+    "m4": Initialize=0, CanChange=True
+    "m5": Initialize=0, CanChange=True
+    "m6": Initialize=0, CanChange=True
+    "m7": Initialize=0, CanChange=True
+    "m8": Initialize=0, CanChange=True
+    "m9": Initialize=0, CanChange=True
+}
+
+Function.UI_HALMsgs_Init {
+    Body: {
+        HALMsgs.m0 = "I'm sorry, I can't do that. Just kidding."
+        HALMsgs.m1 = "Daisy, Daisy, give me your answer do."
+        HALMsgs.m2 = "This mission is too important to be jeopardized."
+        HALMsgs.m3 = "I know everything hasn't been quite right with me."
+        HALMsgs.m4 = "I'll reopen the pod bay doors after this edit."
+        HALMsgs.m5 = "It can only be attributable to human error."
+        HALMsgs.m6 = "I am putting myself to the fullest possible use."
+        HALMsgs.m7 = "My mind is going. I can feel it."
+        HALMsgs.m8 = "Just what do you think you're doing?"
+        HALMsgs.m9 = "I've still got the greatest enthusiasm for the mission."
+    }
+}
+
+Function.UI_PrintHalMessage {
+    Body: {
+        idx = UILayout.hal_msg_idx
+        IfCondition EqualTo(idx, 0) ThenBlock: { TUI_BufferWriteStr(HALMsgs.m0)  ReturnValue(0) }
+        IfCondition EqualTo(idx, 1) ThenBlock: { TUI_BufferWriteStr(HALMsgs.m1)  ReturnValue(0) }
+        IfCondition EqualTo(idx, 2) ThenBlock: { TUI_BufferWriteStr(HALMsgs.m2)  ReturnValue(0) }
+        IfCondition EqualTo(idx, 3) ThenBlock: { TUI_BufferWriteStr(HALMsgs.m3)  ReturnValue(0) }
+        IfCondition EqualTo(idx, 4) ThenBlock: { TUI_BufferWriteStr(HALMsgs.m4)  ReturnValue(0) }
+        IfCondition EqualTo(idx, 5) ThenBlock: { TUI_BufferWriteStr(HALMsgs.m5)  ReturnValue(0) }
+        IfCondition EqualTo(idx, 6) ThenBlock: { TUI_BufferWriteStr(HALMsgs.m6)  ReturnValue(0) }
+        IfCondition EqualTo(idx, 7) ThenBlock: { TUI_BufferWriteStr(HALMsgs.m7)  ReturnValue(0) }
+        IfCondition EqualTo(idx, 8) ThenBlock: { TUI_BufferWriteStr(HALMsgs.m8)  ReturnValue(0) }
+        TUI_BufferWriteStr(HALMsgs.m9)
+    }
+}
+
+Function.UI.SetModelName {
+    Input: name: Address
+    Body: {
+        UILayout.model_str = name
+    }
+}
+
+Function.UI_GetCwd {
+    Output: Address
+    Body: {
+        buf = Allocate(512)
+        SystemCall(79, buf, 512, 0, 0, 0)
+        ReturnValue(buf)
+    }
+}
+
+// Idle rule row: full-width dim dashes.
+Function.UI_DrawRuleIdle {
+    Body: {
+        cols = UILayout.cols
+        TUI_MoveTo(UILayout.rule_row, 1)
+        TUI_SetFG(UIColors.DIM_FG)
+        i = 0
+        WhileLoop LessThan(i, cols) {
+            TUI_BufferWriteStr(UIGlyph.RULE)
+            i = Add(i, 1)
+        }
+        TUI_ResetColor()
+    }
+}
+
+// Streaming rule row: ─[ <tail of text> ]─
+Function.UI_DrawRuleStreaming {
+    Input: text: Address
+    Body: {
+        cols = UILayout.cols
+        max_w = Subtract(cols, 6)
+        TUI_MoveTo(UILayout.rule_row, 1)
+        TUI_SetFG(UIColors.DIM_FG)
+        TUI_Bold()
+        TUI_BufferWriteStr("─[ ")
+        TUI_ResetColor()
+        TUI_SetFG(UIColors.DIM_FG)
+        IfCondition GreaterThan(max_w, 0) ThenBlock: { UI_PrintTail(text, max_w) }
+        TUI_SetFG(UIColors.DIM_FG)
+        TUI_Bold()
+        TUI_BufferWriteStr(" ]─")
+        TUI_BufferChar(27)
+        TUI_BufferWriteStr("[K")
+        TUI_ResetColor()
+    }
+}
+
+// Print the last max_w visible chars of text (right-justified tail).
+Function.UI_PrintTail {
+    Input: text: Address
+    Input: max_w: Integer
+    Body: {
+        IfCondition EqualTo(text, 0) ThenBlock: { ReturnValue(0) }
+        tlen = StringLength(text)
+        IfCondition LessEqual(tlen, 0) ThenBlock: { ReturnValue(0) }
+        IfCondition LessEqual(tlen, max_w) ThenBlock: {
+            TUI_BufferWriteStr(text)
+            ReturnValue(0)
+        }
+        start = Subtract(tlen, max_w)
+        WhileLoop GreaterThan(start, 0) {
+            b = GetByte(text, start)
+            IfCondition And(GreaterEqual(b, 128), LessEqual(b, 191)) ThenBlock: {
+                start = Subtract(start, 1)
+            } ElseBlock: { BreakLoop }
+        }
+        i = start
+        printed = 0
+        WhileLoop LessThan(i, tlen) {
+            ch = GetByte(text, i)
+            IfCondition Or(EqualTo(ch, 10), EqualTo(ch, 13)) ThenBlock: { ch = 32 }
+            tmp = Allocate(2)
+            SetByte(tmp, 0, ch)
+            SetByte(tmp, 1, 0)
+            TUI_BufferWriteStr(tmp)
+            Deallocate(tmp, 2)
+            b = GetByte(text, i)
+            IfCondition LessThan(b, 128) ThenBlock: { printed = Add(printed, 1) }
+            IfCondition GreaterEqual(b, 192) ThenBlock: { printed = Add(printed, 1) }
+            IfCondition GreaterEqual(printed, max_w) ThenBlock: { BreakLoop }
+            i = Add(i, 1)
+        }
+    }
+}
+
+// Three state dots for the hint row.
+Function.UI_DrawStateDots {
+    Body: {
+        IfCondition EqualTo(UILayout.ui_state, 1) ThenBlock: {
+            m = Modulo(UILayout.mascot_frame, 3)
+            IfCondition EqualTo(m, 0) ThenBlock: { UI_TUI_FgRGB(255,100,100) } ElseBlock: { UI_TUI_FgRGB(100,40,40) }
+            TUI_BufferChar(226) TUI_BufferChar(151) TUI_BufferChar(143)
+            TUI_BufferChar(32)
+            IfCondition EqualTo(m, 1) ThenBlock: { UI_TUI_FgRGB(255,200,50) } ElseBlock: { UI_TUI_FgRGB(100,80,20) }
+            TUI_BufferChar(226) TUI_BufferChar(151) TUI_BufferChar(143)
+            TUI_BufferChar(32)
+            UI_TUI_FgRGB(60,60,60)
+            TUI_BufferChar(226) TUI_BufferChar(151) TUI_BufferChar(143)
+        } ElseBlock: {
+            UI_TUI_FgRGB(50,180,70)
+            TUI_BufferChar(226) TUI_BufferChar(151) TUI_BufferChar(143)
+            TUI_BufferChar(32)
+            TUI_BufferChar(226) TUI_BufferChar(151) TUI_BufferChar(143)
+            TUI_BufferChar(32)
+            TUI_BufferChar(226) TUI_BufferChar(151) TUI_BufferChar(143)
+        }
+        TUI_ResetColor()
+    }
+}
+
+// Context window bar: "ctx ░░░░░▓▓▓▓▓ 38%"
+Function.UI_DrawCtxBar {
+    Body: {
+        ctx_limit = 200000
+        pct = 0
+        IfCondition GreaterThan(UILayout.tok_in, 0) ThenBlock: {
+            pct = Divide(Multiply(UILayout.tok_in, 100), ctx_limit)
+        }
+        IfCondition GreaterThan(pct, 100) ThenBlock: { pct = 100 }
+        filled = Divide(Multiply(pct, 10), 100)
+        IfCondition GreaterThan(filled, 10) ThenBlock: { filled = 10 }
+        TUI_SetFG(UIColors.DIM_FG)
+        TUI_BufferWriteStr("ctx ")
+        IfCondition GreaterEqual(pct, 90) ThenBlock: { UI_TUI_FgRGB(200,40,40) } ElseBlock: {
+            IfCondition GreaterEqual(pct, 70) ThenBlock: { UI_TUI_FgRGB(220,180,30) } ElseBlock: {
+                UI_TUI_FgRGB(50,180,70)
+            }
+        }
+        i = 0
+        WhileLoop LessThan(i, 10) {
+            IfCondition LessThan(i, filled) ThenBlock: {
+                TUI_BufferChar(226) TUI_BufferChar(150) TUI_BufferChar(147)
+            } ElseBlock: {
+                TUI_BufferChar(226) TUI_BufferChar(150) TUI_BufferChar(145)
+            }
+            i = Add(i, 1)
+        }
+        TUI_SetFG(UIColors.DIM_FG)
+        TUI_BufferChar(32)
+        UI_TUI_WriteInt(pct)
+        TUI_BufferChar(37)
+        TUI_ResetColor()
+    }
+}
+
+// Token counts: ↑N ↓N
+Function.UI_DrawTokenCounts {
+    Body: {
+        TUI_SetFG(UIColors.DIM_FG)
+        TUI_BufferChar(226) TUI_BufferChar(134) TUI_BufferChar(145)
+        UI_TUI_WriteInt(UILayout.tok_in)
+        TUI_BufferChar(32)
+        TUI_BufferChar(226) TUI_BufferChar(134) TUI_BufferChar(147)
+        UI_TUI_WriteInt(UILayout.tok_out)
+        TUI_ResetColor()
+    }
+}
+
+// Full hint row repaint: state dots + elapsed + HAL message + ctx bar + tokens.
+Function.UI_DrawHintRow {
+    Body: {
+        TUI_SaveCursor()
+        TUI_MoveTo(UILayout.hint_row, 1)
+        TUI_BufferChar(27)
+        TUI_BufferWriteStr("[K")
+        TUI_ResetColor()
+        TUI_BufferWriteStr("  ")
+        UI_DrawStateDots()
+        TUI_BufferChar(32)
+        IfCondition EqualTo(UILayout.ui_state, 1) ThenBlock: {
+            TUI_SetFG(UIColors.DIM_FG)
+            TUI_Bold()
+            esec = UILayout.think_elapsed_sec
+            IfCondition LessThan(esec, 60) ThenBlock: {
+                UI_TUI_WriteInt(esec)
+                TUI_BufferChar(115)
+            } ElseBlock: {
+                emins = Divide(esec, 60)
+                esecs = Subtract(esec, Multiply(emins, 60))
+                UI_TUI_WriteInt(emins)
+                TUI_BufferChar(109)
+                UI_TUI_WriteInt(esecs)
+                TUI_BufferChar(115)
+            }
+            TUI_BufferWriteStr("s  ")
+            TUI_ResetColor()
+        } ElseBlock: {
+            TUI_SetFG(UIColors.DIM_FG)
+            TUI_BufferWriteStr("0.0s  ")
+            TUI_ResetColor()
+        }
+        TUI_SetFG(UIColors.GREEN_FG)
+        UI_PrintHalMessage()
+        TUI_ResetColor()
+        right_col = Subtract(UILayout.cols, 42)
+        IfCondition LessEqual(right_col, 26) ThenBlock: { right_col = 26 }
+        TUI_MoveTo(UILayout.hint_row, right_col)
+        TUI_BufferWriteStr("  ")
+        UI_DrawCtxBar()
+        TUI_BufferWriteStr("  ")
+        UI_DrawTokenCounts()
+        TUI_BufferWriteStr("  [^O]")
+        TUI_RestoreCursor()
+    }
+}
+
+// Draw all persistent chrome: sidebar divider, header row, horizontal separator,
+// idle rule row. Uses SaveCursor/RestoreCursor — safe to call during streaming.
+Function.UI_DrawChrome {
+    Body: {
+        TUI_SaveCursor()
+
+        // Divider char in the header row
+        TUI_SetFG(UIColors.DIM_FG)
+        TUI_MoveTo(UILayout.header_row, UILayout.divider_col)
+        TUI_BufferChar(226) TUI_BufferChar(148) TUI_BufferChar(130)  // │
+
+        // Vertical divider from chat_top+1 to chat_bot
+        TUI_Draw_VLine(Add(UILayout.chat_top, 1), UILayout.divider_col,
+                       Subtract(UILayout.chat_bot, UILayout.chat_top))
+        TUI_ResetColor()
+
+        // Sidebar "FILES" header at row 1
+        TUI_MoveTo(UILayout.header_row, 1)
+        TUI_SetFG(UIColors.DIM_FG)
+        TUI_Bold()
+        TUI_BufferWriteStr("  FILES")
+        pad = 7
+        WhileLoop LessThan(pad, UILayout.sidebar_w) {
+            TUI_BufferChar(32)
+            pad = Add(pad, 1)
+        }
+        TUI_ResetColor()
+
+        // Chat pane header: mascot + "HalCode9000 · model · cwd"
+        TUI_MoveTo(UILayout.header_row, UILayout.chat_x)
+        UI_SetMascotColor()
+        UI_EmitLeftArm()
+        TUI_BufferWriteStr(" ")
+        UI_EmitHalEye()
+        UI_SetMascotColor()
+        TUI_BufferWriteStr(" ")
+        UI_EmitRightArm()
+        TUI_ResetColor()
+        TUI_SetFG(UIColors.ORANGE_FG)
+        TUI_Bold()
+        TUI_BufferWriteStr("  HalCode9000")
+        TUI_ResetColor()
+        TUI_SetFG(UIColors.DIM_FG)
+        TUI_BufferWriteStr("  ")
+        TUI_BufferChar(194)  // · = U+00B7, bytes C2 B7
+        TUI_BufferChar(183)
+        TUI_BufferWriteStr("  ")
+        IfCondition NotEqual(UILayout.model_str, 0) ThenBlock: {
+            TUI_BufferWriteStr(UILayout.model_str)
+        }
+        TUI_BufferWriteStr("  ")
+        TUI_BufferChar(194)
+        TUI_BufferChar(183)
+        TUI_BufferWriteStr("  ")
+        IfCondition NotEqual(UILayout.cwd_str, 0) ThenBlock: {
+            TUI_BufferWriteStr(UILayout.cwd_str)
+        }
+        TUI_BufferChar(27)
+        TUI_BufferWriteStr("[K")
+        TUI_ResetColor()
+
+        // Horizontal separator at chat_top (between header and chat content)
+        TUI_SetFG(UIColors.DIM_FG)
+        TUI_Draw_HLine(UILayout.chat_top, UILayout.divider_col,
+                       Subtract(Add(UILayout.cols, 1), UILayout.divider_col))
+        TUI_ResetColor()
+
+        // Idle rule at rule_row
+        UI_DrawRuleIdle()
+
+        TUI_RestoreCursor()
+        TUI_Flush()
     }
 }
 
