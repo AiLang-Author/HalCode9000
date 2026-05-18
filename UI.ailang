@@ -700,6 +700,9 @@ Function.UI.ChatPrint {
 
         scrolled_any = 0
         // RESUME from the column where the previous ChatPrint left off.
+        IfCondition LessThan(UILayout.chat_col, UILayout.chat_x) ThenBlock: {
+            UILayout.chat_col = UILayout.chat_x
+        }
         TUI_MoveTo(UILayout.chat_cursor, UILayout.chat_col)
         i = 0
         WhileLoop LessThan(i, n) {
@@ -1368,6 +1371,7 @@ Function.UI_EmitRightArm {
 Function.UI_DrawMascot {
     Body: {
         TUI_MoveTo(UI_BodyRow(), 1)
+        TUI_ResetColor()
         UI_SetMascotColor()
         UI_EmitLeftArm()
         pos = UI_MascotEyePos()
@@ -1543,6 +1547,8 @@ Function.UI_DrawRuleIdle {
 Function.UI_DrawRuleStreaming {
     Input: text: Address
     Body: {
+        IfCondition EqualTo(text, 0) ThenBlock: { UI_DrawRuleIdle() ReturnValue(0) }
+        IfCondition LessEqual(StringLength(text), 0) ThenBlock: { UI_DrawRuleIdle() ReturnValue(0) }
         cols = UILayout.cols
         max_w = Subtract(cols, 6)
         TUI_MoveTo(UILayout.rule_row, 1)
@@ -1643,12 +1649,15 @@ Function.UI_DrawCtxBar {
             }
         }
         i = 0
-        WhileLoop LessThan(i, 10) {
-            IfCondition LessThan(i, filled) ThenBlock: {
-                TUI_BufferChar(226) TUI_BufferChar(150) TUI_BufferChar(147)
-            } ElseBlock: {
-                TUI_BufferChar(226) TUI_BufferChar(150) TUI_BufferChar(145)
-            }
+        WhileLoop LessThan(i, filled) {
+            TUI_BufferChar(226) TUI_BufferChar(150) TUI_BufferChar(147)  // ▓ filled
+            i = Add(i, 1)
+        }
+        UI_TUI_FgRGB(60, 60, 60)
+        empty = Subtract(10, filled)
+        i = 0
+        WhileLoop LessThan(i, empty) {
+            TUI_BufferChar(226) TUI_BufferChar(150) TUI_BufferChar(145)  // ░ empty
             i = Add(i, 1)
         }
         TUI_SetFG(UIColors.DIM_FG)
@@ -1677,9 +1686,9 @@ Function.UI_DrawHintRow {
     Body: {
         TUI_SaveCursor()
         TUI_MoveTo(UILayout.hint_row, 1)
+        TUI_ResetColor()
         TUI_BufferChar(27)
         TUI_BufferWriteStr("[K")
-        TUI_ResetColor()
         TUI_BufferWriteStr("  ")
         UI_DrawStateDots()
         TUI_BufferChar(32)
@@ -1698,7 +1707,7 @@ Function.UI_DrawHintRow {
                 UI_TUI_WriteInt(esecs)
                 TUI_BufferChar(115)
             }
-            TUI_BufferWriteStr("s  ")
+            TUI_BufferWriteStr("  ")
             TUI_ResetColor()
         } ElseBlock: {
             TUI_SetFG(UIColors.DIM_FG)
@@ -1750,6 +1759,7 @@ Function.UI_DrawChrome {
 
         // Chat pane header: mascot + "HalCode9000 · model · cwd"
         TUI_MoveTo(UILayout.header_row, UILayout.chat_x)
+        TUI_ResetColor()
         UI_SetMascotColor()
         UI_EmitLeftArm()
         TUI_BufferWriteStr(" ")
@@ -1777,9 +1787,9 @@ Function.UI_DrawChrome {
         IfCondition NotEqual(UILayout.cwd_str, 0) ThenBlock: {
             TUI_BufferWriteStr(UILayout.cwd_str)
         }
+        TUI_ResetColor()
         TUI_BufferChar(27)
         TUI_BufferWriteStr("[K")
-        TUI_ResetColor()
 
         // Horizontal separator at chat_top (between header and chat content)
         TUI_SetFG(UIColors.DIM_FG)
