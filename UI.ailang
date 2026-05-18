@@ -96,6 +96,7 @@ FixedPool.UILayout {
     "hal_msg_idx":       Initialize=0, CanChange=True
     "model_str":         Initialize=0, CanChange=True
     "cwd_str":           Initialize=0, CanChange=True
+    "streaming":         Initialize=0, CanChange=True
 }
 
 FixedPool.UIGlyph {
@@ -659,13 +660,18 @@ Function.UI_PaintPromptFrame {
 // to row-1, clear chat_bot. Uses ESC[<top>;<bot>r scroll region + IND.
 Function.UI_ScrollChatUp {
     Body: {
-        // 1. Clear the prompt frame so it doesn't get scrolled up into the chat
-        TUI_MoveTo(Add(UILayout.chat_bot, 1), 1)
-        TUI_BufferChar(27) TUI_BufferWriteStr("[J")
-        // 2. Move to the absolute bottom of the terminal to guarantee scroll
-        TUI_BufferChar(27) TUI_BufferWriteStr("[999;1H")
-        // 3. Issue a native terminal newline to force the scroll up
-        TUI_BufferChar(10)
+        IfCondition EqualTo(UILayout.streaming, 1) ThenBlock: {
+            // Scroll region is active — newline at chat_bot scrolls only the chat area.
+            // Header (row 1) and prompt rows are outside the region and stay fixed.
+            TUI_MoveTo(UILayout.chat_bot, UILayout.chat_x)
+            TUI_BufferChar(10)
+        } ElseBlock: {
+            // No scroll region during idle — use full-screen scroll approach.
+            TUI_MoveTo(Add(UILayout.chat_bot, 1), 1)
+            TUI_BufferChar(27) TUI_BufferWriteStr("[J")
+            TUI_BufferChar(27) TUI_BufferWriteStr("[999;1H")
+            TUI_BufferChar(10)
+        }
     }
 }
 
@@ -768,7 +774,6 @@ Function.UI.ChatPrintDim {
 // didn't smash the prompt rows.
 Function.UI_RepaintPromptFrameOnly {
     Body: {
-        UI_DrawChrome()
         UI_PaintBodyRow()
         UI_PaintBotRule()
         UI_DrawHintRow()
@@ -906,10 +911,14 @@ Function.UI.SetState {
     Body: {
         UILayout.ui_state = state
         IfCondition EqualTo(state, 1) ThenBlock: {
+            UILayout.streaming = 1
+            TUI_SetScrollRegion(UILayout.chat_top, UILayout.chat_bot)
             UILayout.think_start_ms = UI_GetTimeMs()
             UILayout.think_elapsed_sec = 0
             UILayout.hal_msg_idx = Modulo(Add(UILayout.hal_msg_idx, 1), 10)
         } ElseBlock: {
+            UILayout.streaming = 0
+            TUI_ClearScrollRegion()
             UILayout.active_tool = 0
             UI_DrawRuleIdle()
         }
@@ -1531,15 +1540,22 @@ Function.UI_GetCwd {
 // Idle rule row: full-width dim dashes.
 Function.UI_DrawRuleIdle {
     Body: {
-        cols = UILayout.cols
+        TUI_SaveCursor()
+        TUI_ClearScrollRegion()
+        TUI_ResetColor()
         TUI_MoveTo(UILayout.rule_row, 1)
         TUI_SetFG(UIColors.DIM_FG)
+        cols = UILayout.cols
         i = 0
         WhileLoop LessThan(i, cols) {
             TUI_BufferWriteStr(UIGlyph.RULE)
             i = Add(i, 1)
         }
         TUI_ResetColor()
+        IfCondition EqualTo(UILayout.streaming, 1) ThenBlock: {
+            TUI_SetScrollRegion(UILayout.chat_top, UILayout.chat_bot)
+        }
+        TUI_RestoreCursor()
     }
 }
 
@@ -1549,9 +1565,12 @@ Function.UI_DrawRuleStreaming {
     Body: {
         IfCondition EqualTo(text, 0) ThenBlock: { UI_DrawRuleIdle() ReturnValue(0) }
         IfCondition LessEqual(StringLength(text), 0) ThenBlock: { UI_DrawRuleIdle() ReturnValue(0) }
+        TUI_SaveCursor()
+        TUI_ClearScrollRegion()
         cols = UILayout.cols
         max_w = Subtract(cols, 6)
         TUI_MoveTo(UILayout.rule_row, 1)
+        TUI_ResetColor()
         TUI_SetFG(UIColors.DIM_FG)
         TUI_Bold()
         TUI_BufferWriteStr("─[ ")
@@ -1564,6 +1583,10 @@ Function.UI_DrawRuleStreaming {
         TUI_BufferChar(27)
         TUI_BufferWriteStr("[K")
         TUI_ResetColor()
+        IfCondition EqualTo(UILayout.streaming, 1) ThenBlock: {
+            TUI_SetScrollRegion(UILayout.chat_top, UILayout.chat_bot)
+        }
+        TUI_RestoreCursor()
     }
 }
 
@@ -1685,6 +1708,7 @@ Function.UI_DrawTokenCounts {
 Function.UI_DrawHintRow {
     Body: {
         TUI_SaveCursor()
+        TUI_ClearScrollRegion()
         TUI_MoveTo(UILayout.hint_row, 1)
         TUI_ResetColor()
         TUI_BufferChar(27)
@@ -1725,6 +1749,9 @@ Function.UI_DrawHintRow {
         TUI_BufferWriteStr("  ")
         UI_DrawTokenCounts()
         TUI_BufferWriteStr("  [^O]")
+        IfCondition EqualTo(UILayout.streaming, 1) ThenBlock: {
+            TUI_SetScrollRegion(UILayout.chat_top, UILayout.chat_bot)
+        }
         TUI_RestoreCursor()
     }
 }
@@ -1733,7 +1760,9 @@ Function.UI_DrawHintRow {
 // idle rule row. Uses SaveCursor/RestoreCursor — safe to call during streaming.
 Function.UI_DrawChrome {
     Body: {
+        IfCondition EqualTo(UILayout.streaming, 1) ThenBlock: { ReturnValue(0) }
         TUI_SaveCursor()
+        TUI_ClearScrollRegion()
 
         // Divider char in the header row
         TUI_SetFG(UIColors.DIM_FG)
@@ -1797,9 +1826,18 @@ Function.UI_DrawChrome {
                        Subtract(Add(UILayout.cols, 1), UILayout.divider_col))
         TUI_ResetColor()
 
-        // Idle rule at rule_row
-        UI_DrawRuleIdle()
+        // Idle rule at rule_row — inlined to avoid nesting inside SaveCursor block
+        TUI_ResetColor()
+        TUI_MoveTo(UILayout.rule_row, 1)
+        TUI_SetFG(UIColors.DIM_FG)
+        _ci = 0
+        WhileLoop LessThan(_ci, UILayout.cols) {
+            TUI_BufferWriteStr(UIGlyph.RULE)
+            _ci = Add(_ci, 1)
+        }
+        TUI_ResetColor()
 
+        TUI_SetScrollRegion(UILayout.chat_top, UILayout.chat_bot)
         TUI_RestoreCursor()
         TUI_Flush()
     }
