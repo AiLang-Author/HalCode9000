@@ -1,16 +1,26 @@
-// ailang_lsp.ailang
-// Language Server Protocol Helper for AILang
-// Compiles to: ailang_lsp.x
+// cc_ailang_lsp_ipc.ailang — AILang LSP analysis IPC daemon for HalCode9000.
 //
-// Usage: ./ailang_lsp.x <source_file>
-// Output: JSON object with "diagnostics" and "symbols"
+// Forked from standalone ailang_lsp.ailang. Now a proper cc_tool IPC daemon:
+// loads source, resolves imports, lexes, parses, walks AST for symbols/calls,
+// runs semantic checks (LSPCheck), and runs Analyzer1+2+3 static analysis.
+// Returns JSON with diagnostics, symbols, calls, and imports.
 //
-// Copyright (c) 2026 Sean Collins, 2 Paws Machine and Engineering. All rights reserved.
-// Licensed under the Sean Collins Software License (SCSL).
+// Socket: @halcode/AilangLSP
+// Schema:
+//   source (required): absolute path to .ailang source file
+//
+// Response JSON:
+//   { "ok": bool, "file": "<path>", "symbols": [...], "calls": [...],
+//     "imports": [...], "diagnostics": [...] }
+//
+// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. SCSL.
 
 LibraryImport.XArrays
 LibraryImport.JSON
-
+LibraryImport.Arena
+LibraryImport.Socket
+LibraryImport.StringUtils
+LibraryImport.UtilArgs
 
 // Frontend
 LibraryImport.Compiler.Frontend.Lexer.CLexerMain
@@ -27,55 +37,83 @@ LibraryImport.Compiler.Import.CCoreRegistry
 LibraryImport.Compiler.Import.CImportResolver
 
 // =============================================================================
-// STATE
+// SYS CALL CONSTANTS
+// =============================================================================
+FixedPool.LSPSys {
+    "SYS_READ":   Initialize=0
+    "SYS_OPEN":   Initialize=2
+    "SYS_CLOSE":  Initialize=3
+    "SYS_MKDIR":  Initialize=83
+}
+
+// =============================================================================
+// TOOL CONSTANTS
+// =============================================================================
+FixedPool.LSPConst {
+    "SOCK_PATH": Initialize="@halcode/AilangLSP", CanChange=True
+    "BACKLOG":   Initialize=8
+}
+
+// =============================================================================
+// TOOL STATE (daemon lifetime)
+// =============================================================================
+FixedPool.LSPState {
+    "schema":    Initialize=0,  CanChange=True
+    "listen_fd": Initialize=-1, CanChange=True
+    "running":   Initialize=1,  CanChange=True
+}
+
+// =============================================================================
+// PER-REQUEST STATE (reset between requests)
 // =============================================================================
 FixedPool.LSP {
-    "filename": Initialize=0, CanChange=True
-    "source": Initialize=0, CanChange=True
+    "filename":   Initialize=0, CanChange=True
+    "source":     Initialize=0, CanChange=True
     "source_len": Initialize=0, CanChange=True
-    "ast": Initialize=0, CanChange=True
+    "ast":        Initialize=0, CanChange=True
 }
 
 // =============================================================================
 // FILE I/O
 // =============================================================================
-Function.IO_Open {
+Function.LSP_IO_Open {
     Input: filename: Address
     Input: flags: Integer
     Output: Integer
     Body: {
-        fd = SystemCall(2, filename, flags, 420)
+        fd = SystemCall(LSPSys.SYS_OPEN, filename, flags, 420)
         ReturnValue(fd)
     }
 }
 
-Function.IO_Close {
+Function.LSP_IO_Close {
     Input: fd: Integer
     Output: Integer
     Body: {
-        result = SystemCall(3, fd)
+        result = SystemCall(LSPSys.SYS_CLOSE, fd)
         ReturnValue(result)
     }
 }
 
-Function.IO_Read {
+Function.LSP_IO_Read {
     Input: fd: Integer
     Input: buffer: Address
     Input: count: Integer
     Output: Integer
     Body: {
-        bytes_read = SystemCall(0, fd, buffer, count)
+        bytes_read = SystemCall(LSPSys.SYS_READ, fd, buffer, count)
         ReturnValue(bytes_read)
     }
 }
 
-Function.IO_GetFileSize {
+Function.LSP_IO_GetFileSize {
     Input: fd: Integer
     Output: Integer
     Body: {
-        size = SystemCall(8, fd, 0, 2)
-        SystemCall(8, fd, 0, 0)
-        ReturnValue(size)
+        curr = SystemCall(8, fd, 0, 1)
+        end  = SystemCall(8, fd, 0, 2)
+        SystemCall(8, fd, curr, 0)
+        ReturnValue(end)
     }
 }
 
@@ -83,18 +121,18 @@ Function.LSP_LoadFile {
     Input: filename: Address
     Output: Integer
     Body: {
-        fd = IO_Open(filename, 0)
+        fd = LSP_IO_Open(filename, 0)
         IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
         
-        size = IO_GetFileSize(fd)
+        size = LSP_IO_GetFileSize(fd)
         IfCondition LessEqual(size, 0) ThenBlock: {
-            IO_Close(fd)
+            LSP_IO_Close(fd)
             ReturnValue(0)
         }
         
         buffer = Allocate(Add(size, 1))
-        bytes_read = IO_Read(fd, buffer, size)
-        IO_Close(fd)
+        bytes_read = LSP_IO_Read(fd, buffer, size)
+        LSP_IO_Close(fd)
         
         IfCondition LessEqual(bytes_read, 0) ThenBlock: {
             Deallocate(buffer, Add(size, 1))
@@ -109,65 +147,7 @@ Function.LSP_LoadFile {
 }
 
 // =============================================================================
-// ARGUMENT PARSING
-// =============================================================================
-Function.LSP_GetArg {
-    Input: target_index: Integer
-    Output: Address
-    Body: {
-        cmdline_path = "/proc/self/cmdline"
-        fd = SystemCall(2, cmdline_path, 0, 0)
-        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
-        
-        buffer = Allocate(4096)
-        bytes_read = SystemCall(0, fd, buffer, 4096)
-        SystemCall(3, fd)
-        
-        IfCondition LessEqual(bytes_read, 0) ThenBlock: {
-            Deallocate(buffer, 4096)
-            ReturnValue(0)
-        }
-        
-        current_arg = 0
-        offset = 0
-        WhileLoop LessThan(current_arg, target_index) {
-            WhileLoop LessThan(offset, bytes_read) {
-                ch = GetByte(buffer, offset)
-                offset = Add(offset, 1)
-                IfCondition EqualTo(ch, 0) ThenBlock: { BreakLoop }
-            }
-            current_arg = Add(current_arg, 1)
-        }
-        
-        IfCondition GreaterEqual(offset, bytes_read) ThenBlock: {
-            Deallocate(buffer, 4096)
-            ReturnValue(0)
-        }
-        
-        start_pos = offset
-        len = 0
-        WhileLoop LessThan(offset, bytes_read) {
-            ch = GetByte(buffer, offset)
-            IfCondition EqualTo(ch, 0) ThenBlock: { BreakLoop }
-            len = Add(len, 1)
-            offset = Add(offset, 1)
-        }
-        
-        arg_str = Allocate(Add(len, 1))
-        i = 0
-        WhileLoop LessThan(i, len) {
-            ch = GetByte(buffer, Add(start_pos, i))
-            SetByte(arg_str, i, ch)
-            i = Add(i, 1)
-        }
-        SetByte(arg_str, len, 0)
-        Deallocate(buffer, 4096)
-        ReturnValue(arg_str)
-    }
-}
-
-// =============================================================================
-// AST WALKER FOR SYMBOLS
+// AST WALKER FOR SYMBOLS + CALLS
 // =============================================================================
 Function.LSP_WalkAST {
     Input: node: Address
@@ -185,10 +165,7 @@ Function.LSP_WalkAST {
         name = 0
         sets_scope = 0
         
-        // =================================================================
-        // FUNCTIONS, SUBROUTINES, COMBINATORS, LAMBDAS
-        // These create new scopes for call tracking
-        // =================================================================
+        // --- Functions, Subroutines, Combinators, Lambdas ---
         IfCondition EqualTo(type, AST.FUNCTION) ThenBlock: {
             is_symbol = 1
             kind = "Function"
@@ -214,10 +191,7 @@ Function.LSP_WalkAST {
             sets_scope = 1
         }
         
-        // =================================================================
-        // PARAMETERS & OUTPUT DECLARATIONS
-        // Nested under function scope — enables hover on params
-        // =================================================================
+        // --- Parameters & Output Decls ---
         IfCondition EqualTo(type, AST.PARAMETER) ThenBlock: {
             is_symbol = 1
             kind = "Parameter"
@@ -226,13 +200,10 @@ Function.LSP_WalkAST {
         IfCondition EqualTo(type, AST.OUTPUT_DECL) ThenBlock: {
             is_symbol = 1
             kind = "Output"
-            // Output type stored in data1 (e.g. "Integer", "Address")
             name = AST_GetData1(node)
         }
         
-        // =================================================================
-        // ALL POOL TYPES (10 pool kinds + members + subpools)
-        // =================================================================
+        // --- All Pool Types ---
         IfCondition EqualTo(type, AST.POOL_FIXED) ThenBlock: {
             is_symbol = 1
             kind = "FixedPool"
@@ -284,32 +255,28 @@ Function.LSP_WalkAST {
             name = AST_GetData1(node)
         }
         
-        // Pool members — emitted with parent pool as scope
+        // --- Pool Members ---
         IfCondition EqualTo(type, AST.POOL_MEMBER) ThenBlock: {
             is_symbol = 1
             kind = "Field"
             name = AST_GetData1(node)
         }
         
-        // SubPools
+        // --- SubPools ---
         IfCondition EqualTo(type, AST.SUBPOOL) ThenBlock: {
             is_symbol = 1
             kind = "SubPool"
             name = AST_GetData1(node)
         }
         
-        // =================================================================
-        // IMPORTS — critical for dependency graphing
-        // =================================================================
+        // --- Imports ---
         IfCondition EqualTo(type, AST.LIBRARY_IMPORT) ThenBlock: {
             is_symbol = 1
             kind = "Import"
             name = AST_GetData1(node)
         }
         
-        // =================================================================
-        // MODULE & EXPORT (multi-file support)
-        // =================================================================
+        // --- Module & Export ---
         IfCondition EqualTo(type, AST.MODULE) ThenBlock: {
             is_symbol = 1
             kind = "Module"
@@ -321,9 +288,7 @@ Function.LSP_WalkAST {
             name = AST_GetData1(node)
         }
         
-        // =================================================================
-        // LOOP DECLARATIONS (scope-creating)
-        // =================================================================
+        // --- Loop Declarations ---
         IfCondition EqualTo(type, AST.LOOP_MAIN) ThenBlock: {
             is_symbol = 1
             kind = "LoopMain"
@@ -343,28 +308,21 @@ Function.LSP_WalkAST {
             sets_scope = 1
         }
         
-        // =================================================================
-        // MACROS
-        // =================================================================
+        // --- Macros ---
         IfCondition EqualTo(type, AST.MACRO_DEFINE) ThenBlock: {
             is_symbol = 1
             kind = "Macro"
             name = AST_GetData1(node)
         }
         
-        // =================================================================
-        // ACRONYM DEFINITIONS
-        // =================================================================
+        // --- Acronym Defs ---
         IfCondition EqualTo(type, AST.ACRONYM_DEFS) ThenBlock: {
             is_symbol = 1
             kind = "AcronymDefs"
             name = AST_GetData1(node)
         }
         
-        // =================================================================
-        // TOP-LEVEL ASSIGNMENTS (global variables only)
-        // Scoped assignments (locals) are skipped to keep outline clean
-        // =================================================================
+        // --- Top-level Assignments only ---
         IfCondition EqualTo(type, AST.ASSIGNMENT) ThenBlock: {
             IfCondition EqualTo(current_scope, 0) ThenBlock: {
                 is_symbol = 1
@@ -373,18 +331,14 @@ Function.LSP_WalkAST {
             }
         }
         
-        // =================================================================
-        // SCOPE UPDATE — must happen before child recursion
-        // =================================================================
+        // --- Scope update ---
         IfCondition EqualTo(sets_scope, 1) ThenBlock: {
             IfCondition NotEqual(name, 0) ThenBlock: {
                 next_scope = name
             }
         }
         
-        // =================================================================
-        // EMIT SYMBOL
-        // =================================================================
+        // --- Emit symbol ---
         IfCondition EqualTo(is_symbol, 1) ThenBlock: {
             IfCondition NotEqual(name, 0) ThenBlock: {
                 sym_obj = JSON.NewObject()
@@ -399,7 +353,6 @@ Function.LSP_WalkAST {
                     JSON.SetString(sym_obj, "file", FileMap.result_file)
                 }
                 
-                // Scope context — which function/pool owns this symbol
                 IfCondition NotEqual(current_scope, 0) ThenBlock: {
                     JSON.SetString(sym_obj, "scope", current_scope)
                 }
@@ -408,10 +361,7 @@ Function.LSP_WalkAST {
             }
         }
         
-        // =================================================================
-        // CALL EDGES — function/subroutine calls
-        // Now also emits for module-level calls (RunTask etc.)
-        // =================================================================
+        // --- Emit call edge ---
         IfCondition EqualTo(type, AST.CALL) ThenBlock: {
             target = AST_GetData1(node)
             IfCondition NotEqual(target, 0) ThenBlock: {
@@ -435,9 +385,7 @@ Function.LSP_WalkAST {
             }
         }
         
-        // =================================================================
-        // RECURSE CHILDREN
-        // =================================================================
+        // --- Recurse children ---
         count = AST_GetChildCount(node)
         i = 0
         WhileLoop LessThan(i, count) {
@@ -448,6 +396,9 @@ Function.LSP_WalkAST {
     }
 }
 
+// =============================================================================
+// LINE LOCATION FROM DIAGNOSTIC MESSAGE
+// =============================================================================
 Function.LSP_FindLineForMessage {
     Input: msg: Address
     Input: sym_array: Address
@@ -458,7 +409,6 @@ Function.LSP_FindLineForMessage {
         msg_len = StringLength(msg)
         
         // Messages from Analyzer2/3 start with "filename:NNN:"
-        // Find the FIRST colon, then read digits until second colon
         first_colon = -1
         idx = 0
         WhileLoop LessThan(idx, msg_len) {
@@ -471,7 +421,6 @@ Function.LSP_FindLineForMessage {
         }
         
         IfCondition GreaterEqual(first_colon, 0) ThenBlock: {
-            // Try to read digits after the first colon
             num_start = Add(first_colon, 1)
             line_num = 0
             has_digits = 0
@@ -491,7 +440,7 @@ Function.LSP_FindLineForMessage {
             }
         }
         
-        // Fallback: try quoted names against symbols (for MEM messages)
+        // Fallback: try quoted names against symbols
         sym_count = XArray.XSize(sym_array)
         pos = 0
         WhileLoop LessThan(pos, msg_len) {
@@ -536,11 +485,8 @@ Function.LSP_FindLineForMessage {
     }
 }
 
-
 // =============================================================================
-// IMPORT EXTRACTOR — dedicated pass for clean dependency data
-// Walks only top-level children looking for LIBRARY_IMPORT nodes
-// Output: array of {"name": "...", "line": N} objects
+// IMPORT EXTRACTOR
 // =============================================================================
 Function.LSP_ExtractImports {
     Input: ast: Address
@@ -549,8 +495,6 @@ Function.LSP_ExtractImports {
         IfCondition EqualTo(ast, 0) ThenBlock: { ReturnValue(0) }
         
         ast_type = AST_GetType(ast)
-        
-        // Only scan PROGRAM node's direct children
         IfCondition NotEqual(ast_type, AST.PROGRAM) ThenBlock: { ReturnValue(0) }
         
         count = AST_GetChildCount(ast)
@@ -575,52 +519,43 @@ Function.LSP_ExtractImports {
     }
 }
 
-
-
-// =============================================================================
-// PHASE 2: LIGHTWEIGHT SEMANTIC CHECKS
-// Append these to ailang_lsp.ailang after LSP_ExtractImports
-// Zero new imports — uses XArrays already imported
-// =============================================================================
-
 // =============================================================================
 // SEMANTIC CHECK STATE
 // =============================================================================
 FixedPool.LSPCheck {
-    "defined_funcs": Initialize=0, CanChange=True
-    "defined_lines": Initialize=0, CanChange=True
-    "called_funcs": Initialize=0, CanChange=True
-    "called_lines": Initialize=0, CanChange=True
-    "defined_pools": Initialize=0, CanChange=True
-    "pool_lines": Initialize=0, CanChange=True
-    "has_runtask": Initialize=0, CanChange=True
+    "defined_funcs":  Initialize=0, CanChange=True
+    "defined_lines":  Initialize=0, CanChange=True
+    "called_funcs":   Initialize=0, CanChange=True
+    "called_lines":   Initialize=0, CanChange=True
+    "defined_pools":  Initialize=0, CanChange=True
+    "pool_lines":     Initialize=0, CanChange=True
+    "has_runtask":    Initialize=0, CanChange=True
     "runtask_target": Initialize=0, CanChange=True
-    "runtask_line": Initialize=0, CanChange=True
-    "defined_subs": Initialize=0, CanChange=True
-    "sub_lines": Initialize=0, CanChange=True
-    "import_count": Initialize=0, CanChange=True
+    "runtask_line":   Initialize=0, CanChange=True
+    "defined_subs":   Initialize=0, CanChange=True
+    "sub_lines":      Initialize=0, CanChange=True
+    "import_count":   Initialize=0, CanChange=True
 }
 
 Function.LSPCheck_Init {
     Body: {
         LSPCheck.defined_funcs = XArray.XCreate(128)
         LSPCheck.defined_lines = XArray.XCreate(128)
-        LSPCheck.called_funcs = XArray.XCreate(256)
-        LSPCheck.called_lines = XArray.XCreate(256)
+        LSPCheck.called_funcs  = XArray.XCreate(256)
+        LSPCheck.called_lines  = XArray.XCreate(256)
         LSPCheck.defined_pools = XArray.XCreate(32)
-        LSPCheck.pool_lines = XArray.XCreate(32)
-        LSPCheck.defined_subs = XArray.XCreate(32)
-        LSPCheck.sub_lines = XArray.XCreate(32)
-        LSPCheck.has_runtask = 0
+        LSPCheck.pool_lines    = XArray.XCreate(32)
+        LSPCheck.defined_subs  = XArray.XCreate(32)
+        LSPCheck.sub_lines     = XArray.XCreate(32)
+        LSPCheck.has_runtask   = 0
         LSPCheck.runtask_target = 0
-        LSPCheck.runtask_line = 0
-        LSPCheck.import_count = 0
+        LSPCheck.runtask_line  = 0
+        LSPCheck.import_count  = 0
     }
 }
 
 // =============================================================================
 // COLLECTION PASS — walks AST collecting definitions and calls
-// Runs alongside or after LSP_WalkAST
 // =============================================================================
 Function.LSPCheck_Collect {
     Input: node: Address
@@ -684,7 +619,6 @@ Function.LSPCheck_Collect {
                 IfCondition EqualTo(StringCompare(target, "RunTask"), 0) ThenBlock: {
                     LSPCheck.has_runtask = 1
                     LSPCheck.runtask_line = line
-                    // RunTask argument is first child
                     arg_count = AST_GetChildCount(node)
                     IfCondition GreaterThan(arg_count, 0) ThenBlock: {
                         arg0 = AST_GetChild(node, 0)
@@ -709,8 +643,6 @@ Function.LSPCheck_Collect {
 
 // =============================================================================
 // BUILTIN CHECK — returns 1 if name is a known compiler primitive
-// Covers the ~300 builtins so we don't false-positive on them
-// Strategy: check prefixes and known categories rather than listing all 300
 // =============================================================================
 Function.LSPCheck_IsBuiltin {
     Input: name: Address
@@ -728,7 +660,7 @@ Function.LSPCheck_IsBuiltin {
         IfCondition EqualTo(StringCompare(name, "GetUserChoice"), 0) ThenBlock: { ReturnValue(1) }
         IfCondition EqualTo(StringCompare(name, "ReadKey"), 0) ThenBlock: { ReturnValue(1) }
         
-        // --- Math (named operators compiled inline) ---
+        // --- Math ---
         IfCondition EqualTo(StringCompare(name, "Add"), 0) ThenBlock: { ReturnValue(1) }
         IfCondition EqualTo(StringCompare(name, "Subtract"), 0) ThenBlock: { ReturnValue(1) }
         IfCondition EqualTo(StringCompare(name, "Multiply"), 0) ThenBlock: { ReturnValue(1) }
@@ -758,7 +690,7 @@ Function.LSPCheck_IsBuiltin {
         IfCondition EqualTo(StringCompare(name, "FusedMultiplyAdd"), 0) ThenBlock: { ReturnValue(1) }
         IfCondition EqualTo(StringCompare(name, "Hypotenuse"), 0) ThenBlock: { ReturnValue(1) }
         
-        // --- Comparison (compiled inline but appear as CALL nodes) ---
+        // --- Comparison ---
         IfCondition EqualTo(StringCompare(name, "EqualTo"), 0) ThenBlock: { ReturnValue(1) }
         IfCondition EqualTo(StringCompare(name, "NotEqual"), 0) ThenBlock: { ReturnValue(1) }
         IfCondition EqualTo(StringCompare(name, "LessThan"), 0) ThenBlock: { ReturnValue(1) }
@@ -877,7 +809,7 @@ Function.LSPCheck_IsBuiltin {
         IfCondition EqualTo(StringCompare(name, "MMIORead"), 0) ThenBlock: { ReturnValue(1) }
         IfCondition EqualTo(StringCompare(name, "MMIOWrite"), 0) ThenBlock: { ReturnValue(1) }
         
-        // --- Arena (commonly imported) ---
+        // --- Arena ---
         IfCondition EqualTo(StringCompare(name, "Arena_Init"), 0) ThenBlock: { ReturnValue(1) }
         IfCondition EqualTo(StringCompare(name, "Arena_Alloc"), 0) ThenBlock: { ReturnValue(1) }
         IfCondition EqualTo(StringCompare(name, "Arena_EnsureInit"), 0) ThenBlock: { ReturnValue(1) }
@@ -889,13 +821,13 @@ Function.LSPCheck_IsBuiltin {
         IfCondition EqualTo(StringCompare(name, "ArraySet"), 0) ThenBlock: { ReturnValue(1) }
         IfCondition EqualTo(StringCompare(name, "ArraySize"), 0) ThenBlock: { ReturnValue(1) }
         
-        // Not a builtin
         ReturnValue(0)
     }
 }
 
-// filter for imported functions 
-
+// =============================================================================
+// STRING HELPERS
+// =============================================================================
 Function.LSP_StrStartsWith {
     Input: str: Address
     Input: prefix: Address
@@ -961,11 +893,6 @@ Function.LSP_IsImportedFunc {
     Input: import_array: Address
     Output: Integer
     Body: {
-        // Check if function name starts with any imported library prefix
-        // e.g., "JSON.NewArray" matches import "JSON"
-        // e.g., "Lex_Init" matches import "Compiler.Frontend.Lexer.CLexerMain"
-        // Also skip known builtins that are always available
-        
         IfCondition EqualTo(func_name, 0) ThenBlock: { ReturnValue(0) }
         
         // Skip well-known runtime builtins
@@ -1012,11 +939,10 @@ Function.LSP_IsImportedFunc {
             imp_obj = JSON.AsObject(imp_tagged)
             imp_name = JSON.GetString(imp_obj, "name")
             IfCondition NotEqual(imp_name, 0) ThenBlock: {
-                // Check if func starts with "ImportName."
                 IfCondition EqualTo(LSP_StrStartsWith(func_name, imp_name), 1) ThenBlock: {
                     ReturnValue(1)
                 }
-                // Also check short name: import "Compiler.Frontend.Lexer.CLexerMain"
+                // Check short name: import "Compiler.Frontend.Lexer.CLexerMain"
                 // exports functions like "Lex_Init" — match on last segment
                 dot_name = imp_name
                 imp_len = StringLength(imp_name)
@@ -1044,7 +970,6 @@ Function.LSP_IsImportedFunc {
         ReturnValue(0)
     }
 }
-
 
 // =============================================================================
 // HELPER: Check if name exists in an XArray of strings
@@ -1075,22 +1000,7 @@ Function.LSPCheck_InArray {
 Function.LSPCheck_Run {
     Input: diag_array: Address
     Body: {
-        // ─────────────────────────────────────────────────────────────
-        // CHECK 1: Undefined function calls
-        // ONLY run this check if the file has NO imports.
-        // When imports exist, library functions lose their dots after
-        // resolution (e.g. AST_GetData1 comes from CASTCore) and
-        // would flood with false positives. Files with imports are
-        // multi-module — we can't validate cross-file calls here.
-        // ─────────────────────────────────────────────────────────────
-        has_imports = XArray.XSize(LSPCheck.defined_pools)
-        // Check if any LIBRARY_IMPORT symbols were collected
-        // We reuse defined_funcs scan: look for imports in symbols
-        import_count = 0
-        sym_scan = 0
-        // Count imports by checking the symbols array for Import kind
-        // Simpler: check if the AST had any LIBRARY_IMPORT children
-        // We track this during Collect by counting imports
+        // CHECK 1: Undefined function calls (only when no imports)
         IfCondition EqualTo(LSPCheck.import_count, 0) ThenBlock: {
             call_count = XArray.XSize(LSPCheck.called_funcs)
             i = 0
@@ -1121,9 +1031,7 @@ Function.LSPCheck_Run {
             }
         }
         
-        // ─────────────────────────────────────────────────────────────
         // CHECK 2: Duplicate function/subroutine definitions
-        // ─────────────────────────────────────────────────────────────
         def_count = XArray.XSize(LSPCheck.defined_funcs)
         i = 0
         WhileLoop LessThan(i, def_count) {
@@ -1131,7 +1039,6 @@ Function.LSPCheck_Run {
             line_i = XArray.XGet(LSPCheck.defined_lines, i)
             
             IfCondition NotEqual(name_i, 0) ThenBlock: {
-                // Check all later definitions for duplication
                 j = Add(i, 1)
                 WhileLoop LessThan(j, def_count) {
                     name_j = XArray.XGet(LSPCheck.defined_funcs, j)
@@ -1156,9 +1063,7 @@ Function.LSPCheck_Run {
             i = Add(i, 1)
         }
         
-        // ─────────────────────────────────────────────────────────────
         // CHECK 3: Duplicate pool definitions
-        // ─────────────────────────────────────────────────────────────
         pool_count = XArray.XSize(LSPCheck.defined_pools)
         i = 0
         WhileLoop LessThan(i, pool_count) {
@@ -1190,10 +1095,7 @@ Function.LSPCheck_Run {
             i = Add(i, 1)
         }
         
-        // ─────────────────────────────────────────────────────────────
         // CHECK 4: RunTask target validation
-        // RunTask(X) where X is not a defined SubRoutine
-        // ─────────────────────────────────────────────────────────────
         IfCondition EqualTo(LSPCheck.has_runtask, 1) ThenBlock: {
             IfCondition NotEqual(LSPCheck.runtask_target, 0) ThenBlock: {
                 found = LSPCheck_InArray(LSPCheck.defined_subs, LSPCheck.runtask_target)
@@ -1256,377 +1158,238 @@ Function.LSP_ExtractQuotedName {
 }
 
 // =============================================================================
-// STREAMING JSON OUTPUT
+// DoWork — encapsulated LSP analysis pipeline
+// Called per-request. Returns a JSON root object with keys:
+//   ok, file, symbols, calls, imports, diagnostics
+// On error: returns an object with ok=0 and error string.
 // =============================================================================
-
-// --- Emit a JSON string value (with escaping) directly to stdout ---
-Function.LSP_EmitString {
-    Input: str: Address
+Function.LSP_DoWork {
+    Input: source_path: Address
+    Output: Address
     Body: {
-        IfCondition EqualTo(str, 0) ThenBlock: {
-            PrintMessage("null")
-            ReturnValue(0)
-        }
-        PrintMessage("\"")
-        escaped = JSON.EscapeString(str)
-        PrintMessage(escaped)
-        PrintMessage("\"")
-    }
-}
-
-// --- Emit a single symbol object ---
-Function.LSP_EmitSymbol {
-    Input: tagged: Address
-    Body: {
-        obj = JSON.AsObject(tagged)
-        IfCondition EqualTo(obj, 0) ThenBlock: { ReturnValue(0) }
+        Arena_Init()
         
-        PrintMessage("{\"name\":")
-        name = JSON.GetString(obj, "name")
-        LSP_EmitString(name)
+        // --- Reset per-request state ---
+        LSP.filename   = 0
+        LSP.source     = 0
+        LSP.source_len = 0
+        LSP.ast        = 0
         
-        PrintMessage(",\"kind\":")
-        kind = JSON.GetString(obj, "kind")
-        LSP_EmitString(kind)
-        
-        PrintMessage(",\"line\":")
-        line = JSON.GetNumber(obj, "line")
-        PrintNumber(line)
-        
-        // Optional: scope
-        scope = JSON.GetString(obj, "scope")
-        IfCondition NotEqual(scope, 0) ThenBlock: {
-            PrintMessage(",\"scope\":")
-            LSP_EmitString(scope)
+        // --- Validate source path ---
+        IfCondition EqualTo(source_path, 0) ThenBlock: {
+            err = JSON.NewObject()
+            JSON.SetBool(err, "ok", 0)
+            JSON.SetString(err, "error", "source is required")
+            ReturnValue(err)
         }
         
-        // Optional: file (added by FileMap patch)
-        file = JSON.GetString(obj, "file")
-        IfCondition NotEqual(file, 0) ThenBlock: {
-            PrintMessage(",\"file\":")
-            LSP_EmitString(file)
+        LSP.filename = source_path
+        
+        // --- Load file ---
+        load_ok = LSP_LoadFile(LSP.filename)
+        IfCondition EqualTo(load_ok, 0) ThenBlock: {
+            err = JSON.NewObject()
+            JSON.SetBool(err, "ok", 0)
+            JSON.SetString(err, "error", "Cannot read file")
+            ReturnValue(err)
         }
         
-        PrintMessage("}")
-    }
-}
-
-// --- Emit a single call object ---
-Function.LSP_EmitCall {
-    Input: tagged: Address
-    Body: {
-        obj = JSON.AsObject(tagged)
-        IfCondition EqualTo(obj, 0) ThenBlock: { ReturnValue(0) }
+        // =====================================================================
+        // Phase 0: Import Resolution
+        // =====================================================================
+        source = LSP.source
+        source = AutoImport_Resolve(source)
         
-        PrintMessage("{\"from\":")
-        from = JSON.GetString(obj, "from")
-        LSP_EmitString(from)
-        
-        PrintMessage(",\"to\":")
-        to = JSON.GetString(obj, "to")
-        LSP_EmitString(to)
-        
-        PrintMessage(",\"line\":")
-        line = JSON.GetNumber(obj, "line")
-        PrintNumber(line)
-        
-        // Optional: file
-        file = JSON.GetString(obj, "file")
-        IfCondition NotEqual(file, 0) ThenBlock: {
-            PrintMessage(",\"file\":")
-            LSP_EmitString(file)
-        }
-        
-        PrintMessage("}")
-    }
-}
-
-// --- Emit a single import object ---
-Function.LSP_EmitImport {
-    Input: tagged: Address
-    Body: {
-        obj = JSON.AsObject(tagged)
-        IfCondition EqualTo(obj, 0) ThenBlock: { ReturnValue(0) }
-        
-        PrintMessage("{\"name\":")
-        name = JSON.GetString(obj, "name")
-        LSP_EmitString(name)
-        
-        PrintMessage(",\"line\":")
-        line = JSON.GetNumber(obj, "line")
-        PrintNumber(line)
-        
-        PrintMessage("}")
-    }
-}
-
-// --- Emit a single diagnostic object ---
-Function.LSP_EmitDiagnostic {
-    Input: tagged: Address
-    Body: {
-        obj = JSON.AsObject(tagged)
-        IfCondition EqualTo(obj, 0) ThenBlock: { ReturnValue(0) }
-        
-        PrintMessage("{\"line\":")
-        line = JSON.GetNumber(obj, "line")
-        PrintNumber(line)
-        
-        PrintMessage(",\"col\":")
-        col = JSON.GetNumber(obj, "col")
-        PrintNumber(col)
-        
-        PrintMessage(",\"message\":")
-        msg = JSON.GetString(obj, "message")
-        LSP_EmitString(msg)
-        
-        PrintMessage(",\"severity\":")
-        sev = JSON.GetString(obj, "severity")
-        LSP_EmitString(sev)
-        
-        // Optional: source
-        source = JSON.GetString(obj, "source")
-        IfCondition NotEqual(source, 0) ThenBlock: {
-            PrintMessage(",\"source\":")
-            LSP_EmitString(source)
-        }
-        
-        // Optional: file
-        file = JSON.GetString(obj, "file")
-        IfCondition NotEqual(file, 0) ThenBlock: {
-            PrintMessage(",\"file\":")
-            LSP_EmitString(file)
-        }
-        
-        PrintMessage("}")
-    }
-}
-
-// --- Emit a JSON array by streaming each element ---
-Function.LSP_EmitArray {
-    Input: arr: Address
-    Input: emit_type: Integer
-    Body: {
-        PrintMessage("[")
-        count = XArray.XSize(arr)
-        first = 1
-        i = 0
-        WhileLoop LessThan(i, count) {
-            tagged = XArray.XGet(arr, i)
-            IfCondition NotEqual(tagged, 0) ThenBlock: {
-                IfCondition EqualTo(first, 0) ThenBlock: {
-                    PrintMessage(",")
-                }
-                IfCondition EqualTo(emit_type, 1) ThenBlock: { LSP_EmitCall(tagged) }
-                IfCondition EqualTo(emit_type, 2) ThenBlock: { LSP_EmitSymbol(tagged) }
-                IfCondition EqualTo(emit_type, 3) ThenBlock: { LSP_EmitImport(tagged) }
-                IfCondition EqualTo(emit_type, 4) ThenBlock: { LSP_EmitDiagnostic(tagged) }
-                first = 0
-            }
-            i = Add(i, 1)
-        }
-        PrintMessage("]")
-    }
-}
-
-/// =============================================================================
-// UPDATED MAIN — with import resolution + multi-file diagnostics
-// =============================================================================
-SubRoutine.Main {
-    Arena_Init()
-    
-    LSP.filename = LSP_GetArg(1)
-    IfCondition EqualTo(LSP.filename, 0) ThenBlock: {
-        PrintMessage("{ \"error\": \"No file provided\" }\n")
-        ProcessExit(1)
-    }
-    
-    load_ok = LSP_LoadFile(LSP.filename)
-    IfCondition EqualTo(load_ok, 0) ThenBlock: {
-        PrintMessage("{ \"error\": \"Cannot read file\" }\n")
-        ProcessExit(1)
-    }
-    
-    // =========================================================================
-    // Phase 0: Import Resolution
-    // Mirrors ailang_console.ailang Compile_Source Phase 0
-    // =========================================================================
-    source = LSP.source
-    source = AutoImport_Resolve(source)
-    
-    // Quick scan for import statements (same pattern as console)
-    len = StringLength(source)
-    has_imports = 0
-    scan_pos = 0
-    WhileLoop LessThan(scan_pos, len) {
-        c = GetByte(source, scan_pos)
-        // 'L' (76) for LibraryImport.
-        IfCondition EqualTo(c, 76) ThenBlock: {
-            IfCondition LessThan(Add(scan_pos, 14), len) ThenBlock: {
-                c13 = GetByte(source, Add(scan_pos, 13))
-                // '.' (46) — matches "LibraryImport."
-                IfCondition EqualTo(c13, 46) ThenBlock: {
-                    has_imports = 1
-                    scan_pos = len  // break
-                }
-            }
-        }
-        // 'I' (73) for Import. — but only at line start
-        IfCondition EqualTo(c, 73) ThenBlock: {
-            is_line_start = 0
-            IfCondition EqualTo(scan_pos, 0) ThenBlock: {
-                is_line_start = 1
-            } ElseBlock: {
-                prev_c = GetByte(source, Subtract(scan_pos, 1))
-                // newline (10)
-                IfCondition EqualTo(prev_c, 10) ThenBlock: {
-                    is_line_start = 1
-                }
-            }
-            IfCondition EqualTo(is_line_start, 1) ThenBlock: {
-                IfCondition LessThan(Add(scan_pos, 7), len) ThenBlock: {
-                    c6 = GetByte(source, Add(scan_pos, 6))
-                    // '.' (46) — matches "Import."
-                    IfCondition EqualTo(c6, 46) ThenBlock: {
+        len = StringLength(source)
+        has_imports = 0
+        scan_pos = 0
+        WhileLoop LessThan(scan_pos, len) {
+            c = GetByte(source, scan_pos)
+            // 'L' (76) for LibraryImport.
+            IfCondition EqualTo(c, 76) ThenBlock: {
+                IfCondition LessThan(Add(scan_pos, 14), len) ThenBlock: {
+                    c13 = GetByte(source, Add(scan_pos, 13))
+                    IfCondition EqualTo(c13, 46) ThenBlock: {
                         has_imports = 1
-                        scan_pos = len  // break
+                        scan_pos = len
                     }
                 }
             }
-        }
-        scan_pos = Add(scan_pos, 1)
-    }
-    
-    // Resolve imports if found
-    IfCondition EqualTo(has_imports, 1) ThenBlock: {
-        resolved = Import_ResolveAll(source)
-        IfCondition NotEqual(resolved, 0) ThenBlock: {
-            LSP.source = resolved
-            LSP.source_len = StringLength(resolved)
-        }
-        // FileMap is now populated by Import_EmitAll
-    }
-    
-    // Single-file mode: initialize FileMap with just this file
-    IfCondition EqualTo(has_imports, 0) ThenBlock: {
-        FileMap_Init()
-        FileMap_AddEntry(1, LSP.filename)
-    }
-    
-    // =========================================================================
-    // Phase 1: Lex + Parse
-    // =========================================================================
-    Lex_Init(LSP.source, LSP.source_len)
-    Lex_Tokenize()
-    
-    root = JSON.NewObject()
-    JSON.SetString(root, "file", LSP.filename)
-    
-    // --- Diagnostics ---
-    diag_array = JSON.NewArray()
-    
-    IfCondition EqualTo(Lex.error, 1) ThenBlock: {
-        diag = JSON.NewObject()
-        JSON.SetNumber(diag, "line", Lex.error_line)
-        JSON.SetNumber(diag, "col", Lex.error_col)
-        JSON.SetString(diag, "message", "Lexer Error")
-        JSON.SetString(diag, "severity", "Error")
-        JSON.PushObject(diag_array, diag)
-    } ElseBlock: {
-        Parse_Init(Lex.token_count)
-        LSP.ast = Parse_Program()
-        IfCondition EqualTo(Parse_HasError(), 1) ThenBlock: {
-            diag = JSON.NewObject()
-            JSON.SetNumber(diag, "line", PParser.p_error_line)
-            JSON.SetNumber(diag, "col", PParser.p_error_col)
-            msg = "Parser Error"
-            IfCondition NotEqual(PParser.p_error_msg, 0) ThenBlock: { msg = PParser.p_error_msg }
-            JSON.SetString(diag, "message", msg)
-            JSON.SetString(diag, "severity", "Error")
-            JSON.PushObject(diag_array, diag)
-        }
-    }
-    
-    // --- Symbols + Calls (full AST walk) ---
-    sym_array = JSON.NewArray()
-    call_array = JSON.NewArray()
-    IfCondition NotEqual(LSP.ast, 0) ThenBlock: {
-        LSP_WalkAST(LSP.ast, sym_array, call_array, 0)
-    }
-    JSON.SetArray(root, "symbols", sym_array)
-    JSON.SetArray(root, "calls", call_array)
-    
-    // --- Imports ---
-    import_array = JSON.NewArray()
-    IfCondition NotEqual(LSP.ast, 0) ThenBlock: {
-        LSP_ExtractImports(LSP.ast, import_array)
-    }
-    JSON.SetArray(root, "imports", import_array)
-    
-    // --- Semantic Checks (LSPCheck) ---
-    IfCondition NotEqual(LSP.ast, 0) ThenBlock: {
-        LSPCheck_Init()
-        LSPCheck_Collect(LSP.ast)
-        // If imports were resolved, tell LSPCheck so it skips undefined-func check
-        IfCondition EqualTo(has_imports, 1) ThenBlock: {
-            LSPCheck.import_count = 1
-        }
-        LSPCheck_Run(diag_array)
-    }
-    // =========================================================================
-    // Static Analysis Pass 1 (Memory/Unused)
-    // =========================================================================
-    IfCondition NotEqual(LSP.ast, 0) ThenBlock: {
-        
-        Analyzer.Init()
-        Analyzer.WalkNode(LSP.ast)
-        Analyzer.PostAnalysis()
-        
-        // Emit errors as diagnostics
-        i = 0
-        WhileLoop LessThan(i, Analyzer.error_count) {
-            msg = XArray.XGet(Analyzer.errors, i)
-            IfCondition NotEqual(msg, 0) ThenBlock: {
-                diag = JSON.NewObject()
-                err_line = LSP_FindLineForMessage(msg, sym_array)
-                found = FileMap_Lookup(err_line)
-                IfCondition EqualTo(found, 1) ThenBlock: {
-                    JSON.SetNumber(diag, "line", FileMap.result_line)
-                    JSON.SetString(diag, "file", FileMap.result_file)
+            // 'I' (73) for Import. at line start
+            IfCondition EqualTo(c, 73) ThenBlock: {
+                is_line_start = 0
+                IfCondition EqualTo(scan_pos, 0) ThenBlock: {
+                    is_line_start = 1
                 } ElseBlock: {
-                    JSON.SetNumber(diag, "line", err_line)
+                    prev_c = GetByte(source, Subtract(scan_pos, 1))
+                    IfCondition EqualTo(prev_c, 10) ThenBlock: {
+                        is_line_start = 1
+                    }
                 }
-                JSON.SetNumber(diag, "col", 0)
-                tagged_msg = StringConcat("[MEM] ", msg)
-                JSON.SetString(diag, "message", tagged_msg)
-                JSON.SetString(diag, "severity", "Error")
-                JSON.SetString(diag, "source", "analyzer")
-                JSON.PushObject(diag_array, diag)
-            }
-            i = Add(i, 1)
-        }
-        
-        // Emit warnings as diagnostics (filtered)
-        i = 0
-        WhileLoop LessThan(i, Analyzer.warning_count) {
-            msg = XArray.XGet(Analyzer.warnings, i)
-            IfCondition NotEqual(msg, 0) ThenBlock: {
-                // Filter: skip "called but not defined" for imported/builtin functions
-                is_undef_warning = StringContains(msg, "called but not defined")
-                skip = 0
-                IfCondition EqualTo(is_undef_warning, 1) ThenBlock: {
-                    // With resolved imports, cross-file calls are in the AST
-                    // but analyzer may not track them reliably yet — skip all
-                    IfCondition EqualTo(has_imports, 1) ThenBlock: {
-                        skip = 1
-                    } ElseBlock: {
-                        quoted_name = LSP_ExtractQuotedName(msg)
-                        IfCondition NotEqual(quoted_name, 0) ThenBlock: {
-                            skip = LSP_IsImportedFunc(quoted_name, import_array)
+                IfCondition EqualTo(is_line_start, 1) ThenBlock: {
+                    IfCondition LessThan(Add(scan_pos, 7), len) ThenBlock: {
+                        c6 = GetByte(source, Add(scan_pos, 6))
+                        IfCondition EqualTo(c6, 46) ThenBlock: {
+                            has_imports = 1
+                            scan_pos = len
                         }
                     }
                 }
-                                
-                IfCondition EqualTo(skip, 0) ThenBlock: {
+            }
+            scan_pos = Add(scan_pos, 1)
+        }
+        
+        IfCondition EqualTo(has_imports, 1) ThenBlock: {
+            resolved = Import_ResolveAll(source)
+            IfCondition NotEqual(resolved, 0) ThenBlock: {
+                LSP.source = resolved
+                LSP.source_len = StringLength(resolved)
+            }
+        }
+        
+        IfCondition EqualTo(has_imports, 0) ThenBlock: {
+            FileMap_Init()
+            FileMap_AddEntry(1, LSP.filename)
+        }
+        
+        // =====================================================================
+        // Phase 1: Lex + Parse
+        // =====================================================================
+        Lex_Init(LSP.source, LSP.source_len)
+        Lex_Tokenize()
+        
+        root = JSON.NewObject()
+        JSON.SetString(root, "file", LSP.filename)
+        
+        diag_array = JSON.NewArray()
+        sym_array  = JSON.NewArray()
+        call_array = JSON.NewArray()
+        
+        IfCondition EqualTo(Lex.error, 1) ThenBlock: {
+            diag = JSON.NewObject()
+            JSON.SetNumber(diag, "line", Lex.error_line)
+            JSON.SetNumber(diag, "col", Lex.error_col)
+            JSON.SetString(diag, "message", "Lexer Error")
+            JSON.SetString(diag, "severity", "Error")
+            JSON.PushObject(diag_array, diag)
+        } ElseBlock: {
+            Parse_Init(Lex.token_count)
+            LSP.ast = Parse_Program()
+            IfCondition EqualTo(Parse_HasError(), 1) ThenBlock: {
+                diag = JSON.NewObject()
+                JSON.SetNumber(diag, "line", PParser.p_error_line)
+                JSON.SetNumber(diag, "col", PParser.p_error_col)
+                msg = "Parser Error"
+                IfCondition NotEqual(PParser.p_error_msg, 0) ThenBlock: { msg = PParser.p_error_msg }
+                JSON.SetString(diag, "message", msg)
+                JSON.SetString(diag, "severity", "Error")
+                JSON.PushObject(diag_array, diag)
+            }
+        }
+        
+        // --- Symbols + Calls ---
+        IfCondition NotEqual(LSP.ast, 0) ThenBlock: {
+            LSP_WalkAST(LSP.ast, sym_array, call_array, 0)
+        }
+        
+        // --- Imports ---
+        import_array = JSON.NewArray()
+        IfCondition NotEqual(LSP.ast, 0) ThenBlock: {
+            LSP_ExtractImports(LSP.ast, import_array)
+        }
+        
+        // --- Semantic Checks ---
+        IfCondition NotEqual(LSP.ast, 0) ThenBlock: {
+            LSPCheck_Init()
+            LSPCheck_Collect(LSP.ast)
+            IfCondition EqualTo(has_imports, 1) ThenBlock: {
+                LSPCheck.import_count = 1
+            }
+            LSPCheck_Run(diag_array)
+        }
+        
+        // =====================================================================
+        // Static Analysis Pass 1 (Memory/Unused)
+        // =====================================================================
+        IfCondition NotEqual(LSP.ast, 0) ThenBlock: {
+            Analyzer.Init()
+            Analyzer.WalkNode(LSP.ast)
+            Analyzer.PostAnalysis()
+            
+            i = 0
+            WhileLoop LessThan(i, Analyzer.error_count) {
+                msg = XArray.XGet(Analyzer.errors, i)
+                IfCondition NotEqual(msg, 0) ThenBlock: {
+                    diag = JSON.NewObject()
+                    err_line = LSP_FindLineForMessage(msg, sym_array)
+                    found = FileMap_Lookup(err_line)
+                    IfCondition EqualTo(found, 1) ThenBlock: {
+                        JSON.SetNumber(diag, "line", FileMap.result_line)
+                        JSON.SetString(diag, "file", FileMap.result_file)
+                    } ElseBlock: {
+                        JSON.SetNumber(diag, "line", err_line)
+                    }
+                    JSON.SetNumber(diag, "col", 0)
+                    tagged_msg = StringConcat("[MEM] ", msg)
+                    JSON.SetString(diag, "message", tagged_msg)
+                    JSON.SetString(diag, "severity", "Error")
+                    JSON.SetString(diag, "source", "analyzer")
+                    JSON.PushObject(diag_array, diag)
+                }
+                i = Add(i, 1)
+            }
+            
+            i = 0
+            WhileLoop LessThan(i, Analyzer.warning_count) {
+                msg = XArray.XGet(Analyzer.warnings, i)
+                IfCondition NotEqual(msg, 0) ThenBlock: {
+                    is_undef_warning = StringContains(msg, "called but not defined")
+                    skip = 0
+                    IfCondition EqualTo(is_undef_warning, 1) ThenBlock: {
+                        IfCondition EqualTo(has_imports, 1) ThenBlock: {
+                            skip = 1
+                        } ElseBlock: {
+                            quoted_name = LSP_ExtractQuotedName(msg)
+                            IfCondition NotEqual(quoted_name, 0) ThenBlock: {
+                                skip = LSP_IsImportedFunc(quoted_name, import_array)
+                            }
+                        }
+                    }
+                    
+                    IfCondition EqualTo(skip, 0) ThenBlock: {
+                        diag = JSON.NewObject()
+                        warn_line = LSP_FindLineForMessage(msg, sym_array)
+                        found = FileMap_Lookup(warn_line)
+                        IfCondition EqualTo(found, 1) ThenBlock: {
+                            JSON.SetNumber(diag, "line", FileMap.result_line)
+                            JSON.SetString(diag, "file", FileMap.result_file)
+                        } ElseBlock: {
+                            JSON.SetNumber(diag, "line", warn_line)
+                        }
+                        JSON.SetNumber(diag, "col", 0)
+                        tagged_msg = StringConcat("[MEM] ", msg)
+                        JSON.SetString(diag, "message", tagged_msg)
+                        JSON.SetString(diag, "severity", "Warning")
+                        JSON.SetString(diag, "source", "analyzer")
+                        JSON.PushObject(diag_array, diag)
+                    }
+                }
+                i = Add(i, 1)
+            }
+            
+            Analyzer.Cleanup()
+        }
+        
+        // =====================================================================
+        // Static Analysis Pass 2 (Control Flow)
+        // =====================================================================
+        IfCondition NotEqual(LSP.ast, 0) ThenBlock: {
+            Analyzer2.Run(LSP.ast)
+            
+            i = 0
+            WhileLoop LessThan(i, Analyzer2.warning_count) {
+                msg = XArray.XGet(Analyzer2.warnings, i)
+                IfCondition NotEqual(msg, 0) ThenBlock: {
                     diag = JSON.NewObject()
                     warn_line = LSP_FindLineForMessage(msg, sym_array)
                     found = FileMap_Lookup(warn_line)
@@ -1637,153 +1400,294 @@ SubRoutine.Main {
                         JSON.SetNumber(diag, "line", warn_line)
                     }
                     JSON.SetNumber(diag, "col", 0)
-                    tagged_msg = StringConcat("[MEM] ", msg)
-                    JSON.SetString(diag, "message", tagged_msg)
-                    JSON.SetString(diag, "severity", "Warning")
-                    JSON.SetString(diag, "source", "analyzer")
-                    JSON.PushObject(diag_array, diag)
-                }
-            }
-            i = Add(i, 1)
-        }
-        
-        Analyzer.Cleanup()
-    }
-    
-    // =========================================================================
-    // Static Analysis Pass 2 (Control Flow)
-    // =========================================================================
-    IfCondition NotEqual(LSP.ast, 0) ThenBlock: {
-        Analyzer2.Run(LSP.ast)
-        
-        // Emit Analyzer2 warnings
-        i = 0
-        WhileLoop LessThan(i, Analyzer2.warning_count) {
-            msg = XArray.XGet(Analyzer2.warnings, i)
-            IfCondition NotEqual(msg, 0) ThenBlock: {
-                diag = JSON.NewObject()
-                warn_line = LSP_FindLineForMessage(msg, sym_array)
-                found = FileMap_Lookup(warn_line)
-                IfCondition EqualTo(found, 1) ThenBlock: {
-                    JSON.SetNumber(diag, "line", FileMap.result_line)
-                    JSON.SetString(diag, "file", FileMap.result_file)
-                } ElseBlock: {
-                    JSON.SetNumber(diag, "line", warn_line)
-                }
-                JSON.SetNumber(diag, "col", 0)
-                tagged_msg = StringConcat("[CFG] ", msg)
-                JSON.SetString(diag, "message", tagged_msg)
-                JSON.SetString(diag, "severity", "Warning")
-                JSON.SetString(diag, "source", "analyzer2")
-                JSON.PushObject(diag_array, diag)
-            }
-            i = Add(i, 1)
-        }
-        
-        // Emit Analyzer2 hints (optimization suggestions)
-        IfCondition NotEqual(Analyzer2.hints, 0) ThenBlock: {
-            i = 0
-            WhileLoop LessThan(i, Analyzer2.hint_count) {
-                msg = XArray.XGet(Analyzer2.hints, i)
-                IfCondition NotEqual(msg, 0) ThenBlock: {
-                    diag = JSON.NewObject()
-                    hint_line = LSP_FindLineForMessage(msg, sym_array)
-                    found = FileMap_Lookup(hint_line)
-                    IfCondition EqualTo(found, 1) ThenBlock: {
-                        JSON.SetNumber(diag, "line", FileMap.result_line)
-                        JSON.SetString(diag, "file", FileMap.result_file)
-                    } ElseBlock: {
-                        JSON.SetNumber(diag, "line", hint_line)
-                    }
-                    JSON.SetNumber(diag, "col", 0)
                     tagged_msg = StringConcat("[CFG] ", msg)
                     JSON.SetString(diag, "message", tagged_msg)
-                    JSON.SetString(diag, "severity", "Hint")
+                    JSON.SetString(diag, "severity", "Warning")
                     JSON.SetString(diag, "source", "analyzer2")
                     JSON.PushObject(diag_array, diag)
                 }
                 i = Add(i, 1)
             }
+            
+            IfCondition NotEqual(Analyzer2.hints, 0) ThenBlock: {
+                i = 0
+                WhileLoop LessThan(i, Analyzer2.hint_count) {
+                    msg = XArray.XGet(Analyzer2.hints, i)
+                    IfCondition NotEqual(msg, 0) ThenBlock: {
+                        diag = JSON.NewObject()
+                        hint_line = LSP_FindLineForMessage(msg, sym_array)
+                        found = FileMap_Lookup(hint_line)
+                        IfCondition EqualTo(found, 1) ThenBlock: {
+                            JSON.SetNumber(diag, "line", FileMap.result_line)
+                            JSON.SetString(diag, "file", FileMap.result_file)
+                        } ElseBlock: {
+                            JSON.SetNumber(diag, "line", hint_line)
+                        }
+                        JSON.SetNumber(diag, "col", 0)
+                        tagged_msg = StringConcat("[CFG] ", msg)
+                        JSON.SetString(diag, "message", tagged_msg)
+                        JSON.SetString(diag, "severity", "Hint")
+                        JSON.SetString(diag, "source", "analyzer2")
+                        JSON.PushObject(diag_array, diag)
+                    }
+                    i = Add(i, 1)
+                }
+            }
+        }
+        
+        // =====================================================================
+        // Static Analysis Pass 3 (Data Flow)
+        // =====================================================================
+        IfCondition NotEqual(LSP.ast, 0) ThenBlock: {
+            Analyzer3.Run(LSP.ast)
+            
+            i = 0
+            WhileLoop LessThan(i, Analyzer3.error_count) {
+                msg = XArray.XGet(Analyzer3.errors, i)
+                IfCondition NotEqual(msg, 0) ThenBlock: {
+                    diag = JSON.NewObject()
+                    err_line = LSP_FindLineForMessage(msg, sym_array)
+                    found = FileMap_Lookup(err_line)
+                    IfCondition EqualTo(found, 1) ThenBlock: {
+                        JSON.SetNumber(diag, "line", FileMap.result_line)
+                        JSON.SetString(diag, "file", FileMap.result_file)
+                    } ElseBlock: {
+                        JSON.SetNumber(diag, "line", err_line)
+                    }
+                    JSON.SetNumber(diag, "col", 0)
+                    tagged_msg = StringConcat("[DFA] ", msg)
+                    JSON.SetString(diag, "message", tagged_msg)
+                    JSON.SetString(diag, "severity", "Error")
+                    JSON.SetString(diag, "source", "analyzer3")
+                    JSON.PushObject(diag_array, diag)
+                }
+                i = Add(i, 1)
+            }
+            
+            i = 0
+            WhileLoop LessThan(i, Analyzer3.warning_count) {
+                msg = XArray.XGet(Analyzer3.warnings, i)
+                IfCondition NotEqual(msg, 0) ThenBlock: {
+                    diag = JSON.NewObject()
+                    warn_line = LSP_FindLineForMessage(msg, sym_array)
+                    found = FileMap_Lookup(warn_line)
+                    IfCondition EqualTo(found, 1) ThenBlock: {
+                        JSON.SetNumber(diag, "line", FileMap.result_line)
+                        JSON.SetString(diag, "file", FileMap.result_file)
+                    } ElseBlock: {
+                        JSON.SetNumber(diag, "line", warn_line)
+                    }
+                    JSON.SetNumber(diag, "col", 0)
+                    tagged_msg = StringConcat("[DFA] ", msg)
+                    JSON.SetString(diag, "message", tagged_msg)
+                    JSON.SetString(diag, "severity", "Warning")
+                    JSON.SetString(diag, "source", "analyzer3")
+                    JSON.PushObject(diag_array, diag)
+                }
+                i = Add(i, 1)
+            }
+            
+            Analyzer3.Cleanup()
+        }
+        
+        // --- Build response ---
+        JSON.SetBool(root, "ok", 1)
+        JSON.SetArray(root, "symbols", sym_array)
+        JSON.SetArray(root, "calls", call_array)
+        JSON.SetArray(root, "imports", import_array)
+        JSON.SetArray(root, "diagnostics", diag_array)
+        
+        Lex_Free()
+        ReturnValue(root)
+    }
+}
+
+// =============================================================================
+// IPC LAYER
+// =============================================================================
+
+Function.LSP_BuildSchema {
+    Output: Address
+    Body: {
+        s = UtilArgs_NewSchema("AilangLSP", "Analyze AILang source files: lex, parse, AST walk, semantic checks, and static analysis (Memory, CFG, DFA)")
+        UtilArgs_AddField(s, "source", "string", 1, "Absolute path to the .ailang source file", "source")
+        ReturnValue(s)
+    }
+}
+
+Function.LSP_SendError {
+    Input: client_fd: Integer
+    Input: id: Address
+    Input: msg: Address
+    Body: {
+        resp = JSON.NewObject()
+        JSON.SetString(resp, "method", "result")
+        IfCondition NotEqual(id, 0) ThenBlock: { JSON.SetString(resp, "id", id) }
+        JSON.SetBool(resp, "ok", 0)
+        JSON.SetString(resp, "error", msg)
+        Socket.SendMsg(client_fd, JSON.SerializeObject(resp))
+    }
+}
+
+Function.LSP_SendResult {
+    Input: client_fd: Integer
+    Input: id: Address
+    Input: result_obj: Address
+    Body: {
+        resp = JSON.NewObject()
+        JSON.SetString(resp, "method", "result")
+        IfCondition NotEqual(id, 0) ThenBlock: { JSON.SetString(resp, "id", id) }
+        
+        // Copy top-level keys from result_obj into resp
+        ok_val = JSON.GetBool(result_obj, "ok")
+        JSON.SetBool(resp, "ok", ok_val)
+        
+        IfCondition EqualTo(ok_val, 0) ThenBlock: {
+            err_msg = JSON.GetString(result_obj, "error")
+            IfCondition NotEqual(err_msg, 0) ThenBlock: {
+                JSON.SetString(resp, "error", err_msg)
+            }
+        } ElseBlock: {
+            file_val = JSON.GetString(result_obj, "file")
+            IfCondition NotEqual(file_val, 0) ThenBlock: {
+                JSON.SetString(resp, "file", file_val)
+            }
+            
+            syms = JSON.GetArray(result_obj, "symbols")
+            IfCondition NotEqual(syms, 0) ThenBlock: {
+                JSON.SetArray(resp, "symbols", syms)
+            }
+            
+            calls = JSON.GetArray(result_obj, "calls")
+            IfCondition NotEqual(calls, 0) ThenBlock: {
+                JSON.SetArray(resp, "calls", calls)
+            }
+            
+            imps = JSON.GetArray(result_obj, "imports")
+            IfCondition NotEqual(imps, 0) ThenBlock: {
+                JSON.SetArray(resp, "imports", imps)
+            }
+            
+            diags = JSON.GetArray(result_obj, "diagnostics")
+            IfCondition NotEqual(diags, 0) ThenBlock: {
+                JSON.SetArray(resp, "diagnostics", diags)
+            }
+        }
+        
+        Socket.SendMsg(client_fd, JSON.SerializeObject(resp))
+    }
+}
+
+Function.LSP_SendSchema {
+    Input: client_fd: Integer
+    Body: {
+        schema_str = UtilArgs_ExportToolSchema(LSPState.schema)
+        parsed = ParseJSON(schema_str)
+        schema_obj = JSON.AsObject(parsed)
+        resp = JSON.NewObject()
+        JSON.SetString(resp, "method", "schema_response")
+        IfCondition NotEqual(schema_obj, 0) ThenBlock: { JSON.SetObject(resp, "schema", schema_obj) }
+        Socket.SendMsg(client_fd, JSON.SerializeObject(resp))
+    }
+}
+
+Function.LSP_HandleRequest {
+    Input: client_fd: Integer
+    Input: req_str: Address
+    Body: {
+        parsed = ParseJSON(req_str)
+        IfCondition EqualTo(parsed, 0) ThenBlock: {
+            LSP_SendError(client_fd, 0, "invalid JSON")
+            ReturnValue(0)
+        }
+        obj = JSON.AsObject(parsed)
+        IfCondition EqualTo(obj, 0) ThenBlock: {
+            LSP_SendError(client_fd, 0, "request must be a JSON object")
+            JSON.Free(parsed)  ReturnValue(0)
+        }
+        method = JSON.GetString(obj, "method")
+        IfCondition EqualTo(method, 0) ThenBlock: {
+            LSP_SendError(client_fd, 0, "missing method")
+            JSON.Free(parsed)  ReturnValue(0)
+        }
+
+        IfCondition EqualTo(StringCompare(method, "schema"), 0) ThenBlock: {
+            LSP_SendSchema(client_fd)
+            JSON.Free(parsed)  ReturnValue(0)
+        }
+
+        IfCondition EqualTo(StringCompare(method, "call"), 0) ThenBlock: {
+            id        = JSON.GetString(obj, "id")
+            args      = JSON.GetObject(obj, "args")
+            validated = UtilArgs_ParseIPC(LSPState.schema, args)
+            IfCondition EqualTo(validated, 0) ThenBlock: {
+                LSP_SendError(client_fd, id, "missing required argument: source")
+                JSON.Free(parsed)  ReturnValue(0)
+            }
+            source = UtilArgs_GetString(validated, "source")
+            IfCondition EqualTo(source, 0) ThenBlock: {
+                LSP_SendError(client_fd, id, "source is required")
+                JSON.Free(parsed)  ReturnValue(0)
+            }
+
+            result = LSP_DoWork(source)
+            LSP_SendResult(client_fd, id, result)
+            JSON.Free(parsed)
+            ReturnValue(0)
+        }
+
+        LSP_SendError(client_fd, 0, "unknown method")
+        JSON.Free(parsed)
+    }
+}
+
+// =============================================================================
+// MAIN DAEMON LOOP
+// =============================================================================
+
+SubRoutine.Main {
+    LSPState.schema = LSP_BuildSchema()
+
+    SystemCall(LSPSys.SYS_MKDIR, "/tmp/ailang_cctools", 493, 0, 0, 0)
+
+    fd = Socket.Create(1, 1)
+    IfCondition LessThan(fd, 0) ThenBlock: {
+        PrintMessage("[cc_ailang_lsp_ipc] socket create failed\n")
+        Exit(1)
+    }
+    br = Socket.BindUnix(fd, LSPConst.SOCK_PATH)
+    IfCondition LessThan(br, 0) ThenBlock: {
+        PrintMessage("[cc_ailang_lsp_ipc] bind failed — socket already in use\n")
+        Socket.Close(fd)
+        Exit(1)
+    }
+    lr = Socket.Listen(fd, LSPConst.BACKLOG)
+    IfCondition LessThan(lr, 0) ThenBlock: {
+        PrintMessage("[cc_ailang_lsp_ipc] listen failed\n")
+        Socket.Close(fd)
+        Exit(1)
+    }
+    LSPState.listen_fd = fd
+    PrintMessage("[cc_ailang_lsp_ipc] listening on @halcode/AilangLSP\n")
+
+    WhileLoop EqualTo(LSPState.running, 1) {
+        client_fd = Socket.Accept(LSPState.listen_fd)
+        IfCondition GreaterEqual(client_fd, 0) ThenBlock: {
+            done = 0
+            WhileLoop EqualTo(done, 0) {
+                req = Socket.RecvMsg(client_fd)
+                IfCondition EqualTo(req, 0) ThenBlock: { done = 1 }
+                IfCondition NotEqual(req, 0) ThenBlock: {
+                    IfCondition NotEqual(req, -1) ThenBlock: {
+                        LSP_HandleRequest(client_fd, req)
+                    }
+                }
+            }
+            Socket.Close(client_fd)
         }
     }
-    
-    // =========================================================================
-    // Static Analysis Pass 3 (Data Flow)
-    // =========================================================================
-    IfCondition NotEqual(LSP.ast, 0) ThenBlock: {
-        Analyzer3.Run(LSP.ast)
-        
-        // Emit Analyzer3 errors
-        i = 0
-        WhileLoop LessThan(i, Analyzer3.error_count) {
-            msg = XArray.XGet(Analyzer3.errors, i)
-            IfCondition NotEqual(msg, 0) ThenBlock: {
-                diag = JSON.NewObject()
-                err_line = LSP_FindLineForMessage(msg, sym_array)
-                found = FileMap_Lookup(err_line)
-                IfCondition EqualTo(found, 1) ThenBlock: {
-                    JSON.SetNumber(diag, "line", FileMap.result_line)
-                    JSON.SetString(diag, "file", FileMap.result_file)
-                } ElseBlock: {
-                    JSON.SetNumber(diag, "line", err_line)
-                }
-                JSON.SetNumber(diag, "col", 0)
-                tagged_msg = StringConcat("[DFA] ", msg)
-                JSON.SetString(diag, "message", tagged_msg)
-                JSON.SetString(diag, "severity", "Error")
-                JSON.SetString(diag, "source", "analyzer3")
-                JSON.PushObject(diag_array, diag)
-            }
-            i = Add(i, 1)
-        }
-        
-        // Emit Analyzer3 warnings
-        i = 0
-        WhileLoop LessThan(i, Analyzer3.warning_count) {
-            msg = XArray.XGet(Analyzer3.warnings, i)
-            IfCondition NotEqual(msg, 0) ThenBlock: {
-                diag = JSON.NewObject()
-                warn_line = LSP_FindLineForMessage(msg, sym_array)
-                found = FileMap_Lookup(warn_line)
-                IfCondition EqualTo(found, 1) ThenBlock: {
-                    JSON.SetNumber(diag, "line", FileMap.result_line)
-                    JSON.SetString(diag, "file", FileMap.result_file)
-                } ElseBlock: {
-                    JSON.SetNumber(diag, "line", warn_line)
-                }
-                JSON.SetNumber(diag, "col", 0)
-                tagged_msg = StringConcat("[DFA] ", msg)
-                JSON.SetString(diag, "message", tagged_msg)
-                JSON.SetString(diag, "severity", "Warning")
-                JSON.SetString(diag, "source", "analyzer3")
-                JSON.PushObject(diag_array, diag)
-            }
-            i = Add(i, 1)
-        }
-        
-        Analyzer3.Cleanup()
-    }
-    
-    // Stream JSON directly to stdout — no mega-string allocation
-    PrintMessage("{\"file\":")
-    LSP_EmitString(LSP.filename)
-    
-    PrintMessage(",\"calls\":")
-    LSP_EmitArray(call_array, 1)
-    
-    PrintMessage(",\"symbols\":")
-    LSP_EmitArray(sym_array, 2)
-    
-    PrintMessage(",\"imports\":")
-    LSP_EmitArray(import_array, 3)
-    
-    PrintMessage(",\"diagnostics\":")
-    LSP_EmitArray(diag_array, 4)
-    
-    PrintMessage("}\n")
-    
-    Lex_Free()
-    ProcessExit(0)
+    Socket.Close(LSPState.listen_fd)
+    Exit(0)
 }
 
 RunTask(Main)

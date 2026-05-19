@@ -224,6 +224,9 @@ Function.Backend.GetToolId {
 // =============================================================================
 Function.Backend.PrintUsage {
     Body: {
+        IfCondition EqualTo(BackendState.kind, BackendKind.ANTHROPIC) ThenBlock: {
+            Anthropic.PrintUsage()
+        }
         IfCondition EqualTo(BackendState.kind, BackendKind.OPENAI) ThenBlock: {
             OpenAI.PrintUsage()
         }

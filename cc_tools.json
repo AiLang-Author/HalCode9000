@@ -21,6 +21,7 @@
     {"binary": "./cc_olympus_ipc.x",  "name": "Olympus",  "socket": "@halcode/Olympus"},
     {"binary": "./cc_sleep_ipc.x",    "name": "Sleep",    "socket": "@halcode/Sleep"},
     {"binary": "./cc_skills_ipc.x",   "name": "Skills",   "socket": "@halcode/Skills"},
-    {"binary": "./cc_ailang_ipc.x",  "name": "Ailang",   "socket": "@halcode/Ailang"}
+    {"binary": "./cc_ailang_ipc.x",      "name": "Ailang",    "socket": "@halcode/Ailang"},
+    {"binary": "./cc_ailang_lsp_ipc.x",  "name": "AilangLSP", "socket": "@halcode/AilangLSP"}
   ]
 }
