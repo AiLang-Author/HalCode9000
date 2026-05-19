@@ -2739,9 +2739,10 @@ Function.CC_AgentLog {
     }
 }
 
-// Headless turn: redirect fd 1 to /dev/null, init TUI (escape seqs discarded,
-// raw-mode ioctl fails silently on pipe), run CC_RunTurn once, restore fd 1,
-// then write the final assistant response to stdout.
+// Headless agentic loop: redirect fd 1 to /dev/null, init TUI (escape seqs
+// discarded, raw-mode ioctl fails silently on pipe), loop CC_RunTurn until the
+// model stops requesting tools (same keep_going logic as CC_ChatLoop), restore
+// fd 1, then write the final assistant response to stdout.
 Function.CC_RunAgentMode {
     Input: prompt: Address
     Body: {
@@ -2760,9 +2761,45 @@ Function.CC_RunAgentMode {
         UI.Init()
         CC_AgentLog("[worker] appending prompt to history")
         History.AppendUser(prompt)
-        CC_AgentLog("[worker] CC_RunTurn starting")
-        CC_RunTurn()
-        CC_AgentLog("[worker] CC_RunTurn complete")
+
+        // Agentic loop: keep calling CC_RunTurn as long as the model requests
+        // tools. After each turn, if the last history entry is a "user" role
+        // block (i.e. tool results were just appended), the model needs another
+        // round. Cap at 25 iterations to match the system-prompt rule.
+        agent_turn = 0
+        agent_max_turns = 25
+        agent_keep_going = 1
+        WhileLoop And(EqualTo(agent_keep_going, 1), LessThan(agent_turn, agent_max_turns)) {
+            agent_keep_going = 0
+            CC_AgentLog(StringConcat("[worker] CC_RunTurn turn=", NumberToString(agent_turn)))
+            CC_RunTurn()
+            CC_AgentLog("[worker] CC_RunTurn complete")
+
+            // Tool results are appended as role:"user" messages by
+            // Backend.AppendToolResultsToHistory. If the last history entry
+            // has role "user", the model made tool calls this round and needs
+            // another API call to process the results.
+            _am_msgs = History.GetMessagesArray()
+            _am_cnt = History.Count()
+            IfCondition GreaterThan(_am_cnt, 0) ThenBlock: {
+                _am_last_tag = JSON.ArrayGet(_am_msgs, Subtract(_am_cnt, 1))
+                _am_last_msg = JSON.AsObject(_am_last_tag)
+                IfCondition NotEqual(_am_last_msg, 0) ThenBlock: {
+                    _am_last_role = JSON.GetString(_am_last_msg, "role")
+                    IfCondition NotEqual(_am_last_role, 0) ThenBlock: {
+                        IfCondition EqualTo(StringCompare(_am_last_role, "user"), 0) ThenBlock: {
+                            agent_keep_going = 1
+                        }
+                    }
+                }
+            }
+            agent_turn = Add(agent_turn, 1)
+        }
+
+        IfCondition GreaterEqual(agent_turn, agent_max_turns) ThenBlock: {
+            CC_AgentLog("[worker] WARNING: hit max turn cap (25) — stopping")
+        }
+
         UI.Shutdown()
 
         // Restore stdout before writing result
