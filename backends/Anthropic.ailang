@@ -167,11 +167,11 @@ Function.Anthropic.BuildHeaders {
         c = StringConcat(b, AnthConst.ANTH_VERSION)
         d = StringConcat(c, "\ncontent-type: application/json")
         e = StringConcat(d, "\naccept: text/event-stream")
-        // oauth beta combines oauth + caching; api-key only needs caching
+        // oauth beta combines oauth + caching + extended-cache-ttl (for 1h TTL support)
         IfCondition EqualTo(is_oauth, 1) ThenBlock: {
-            f = StringConcat(e, "\nanthropic-beta: oauth-2025-04-20,prompt-caching-2024-07-31\n")
+            f = StringConcat(e, "\nanthropic-beta: oauth-2025-04-20,prompt-caching-2024-07-31,extended-cache-ttl-2025-02-19\n")
         } ElseBlock: {
-            f = StringConcat(e, "\nanthropic-beta: prompt-caching-2024-07-31\n")
+            f = StringConcat(e, "\nanthropic-beta: prompt-caching-2024-07-31,extended-cache-ttl-2025-02-19\n")
         }
         ReturnValue(f)
     }
@@ -199,11 +199,13 @@ Function.Anthropic.BuildRequest {
         JSON.SetString(req, "model", AnthCfg.model)
         JSON.SetNumber(req, "max_tokens", AnthCfg.max_tokens)
         JSON.SetBool(req, "stream", 1)
-        // System prompt as a cached text block. Anthropic caches the prefix up to
-        // this breakpoint — subsequent turns pay ~10% of the system prompt token cost.
+
+        // System prompt with 1-hour cached text block. 1h TTL survives
+        // inter-turn gaps that would expire the default 5-minute cache.
         IfCondition NotEqual(AnthCfg.system_prompt, 0) ThenBlock: {
             sys_cc = JSON.NewObject()
             JSON.SetString(sys_cc, "type", "ephemeral")
+            JSON.SetString(sys_cc, "ttl", "1h")
             sys_block = JSON.NewObject()
             JSON.SetString(sys_block, "type", "text")
             JSON.SetString(sys_block, "text", AnthCfg.system_prompt)
@@ -212,18 +214,21 @@ Function.Anthropic.BuildRequest {
             JSON.PushObject(sys_arr, sys_block)
             JSON.SetArray(req, "system", sys_arr)
         }
+
         JSON.SetArray(req, "messages", messages_arr)
+
+        // Last tool gets 1-hour cache_control — extends breakpoint past
+        // system+tools so both are covered in the same cache slot.
         tools_count = 0
         IfCondition NotEqual(tools_arr, 0) ThenBlock: {
             tools_count = JSON.ArrayLength(tools_arr)
             IfCondition GreaterThan(tools_count, 0) ThenBlock: {
-                // Add cache_control to the last tool — this extends the cache
-                // breakpoint past system+tools so both are cached together.
                 last_tag = JSON.ArrayGet(tools_arr, Subtract(tools_count, 1))
                 last_tool = JSON.AsObject(last_tag)
                 IfCondition NotEqual(last_tool, 0) ThenBlock: {
                     tool_cc = JSON.NewObject()
                     JSON.SetString(tool_cc, "type", "ephemeral")
+                    JSON.SetString(tool_cc, "ttl", "1h")
                     JSON.SetObject(last_tool, "cache_control", tool_cc)
                 }
                 JSON.SetArray(req, "tools", tools_arr)
