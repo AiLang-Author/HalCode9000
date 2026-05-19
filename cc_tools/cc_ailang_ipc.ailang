@@ -220,8 +220,6 @@ Function.CCAlg_SendResult {
     Input: client_fd: Integer
     Input: id: Address
     Input: ok: Integer
-    Input: errors: Integer
-    Input: warnings: Integer
     Input: output_path: Address
     Input: content: Address
     Body: {
@@ -229,8 +227,6 @@ Function.CCAlg_SendResult {
         JSON.SetString(resp, "method", "result")
         IfCondition NotEqual(id, 0) ThenBlock: { JSON.SetString(resp, "id", id) }
         JSON.SetBool(resp, "ok", ok)
-        JSON.SetNumber(resp, "errors", errors)
-        JSON.SetNumber(resp, "warnings", warnings)
         IfCondition NotEqual(output_path, 0) ThenBlock: {
             JSON.SetString(resp, "output", output_path)
         }
@@ -314,15 +310,11 @@ Function.CCAlg_HandleRequest {
                     CCAlg_SendError(client_fd, id, "failed to fork compiler process")
                     JSON.Free(parsed)  ReturnValue(0)
                 }
-                errs  = CCAlg_ScanIntAfter(CCAilangState.out_buf, used, "Summary: ")
-                warns = CCAlg_ScanIntAfter(CCAilangState.out_buf, used, "error(s), ")
-                IfCondition LessThan(errs,  0) ThenBlock: { errs  = 0 }
-                IfCondition LessThan(warns, 0) ThenBlock: { warns = 0 }
                 ok = 0
                 IfCondition EqualTo(CCAilangState.last_exit, 0) ThenBlock: { ok = 1 }
                 out_path = 0
                 IfCondition EqualTo(ok, 1) ThenBlock: { out_path = output }
-                CCAlg_SendResult(client_fd, id, ok, errs, warns, out_path, CCAilangState.out_buf)
+                CCAlg_SendResult(client_fd, id, ok, out_path, CCAilangState.out_buf)
                 JSON.Free(parsed)
                 ReturnValue(0)
             }
@@ -339,13 +331,9 @@ Function.CCAlg_HandleRequest {
                     CCAlg_SendError(client_fd, id, "failed to fork analyzer process")
                     JSON.Free(parsed)  ReturnValue(0)
                 }
-                errs  = CCAlg_ScanIntAfter(CCAilangState.out_buf, used, "Summary: ")
-                warns = CCAlg_ScanIntAfter(CCAilangState.out_buf, used, "error(s), ")
-                IfCondition LessThan(errs,  0) ThenBlock: { errs  = 0 }
-                IfCondition LessThan(warns, 0) ThenBlock: { warns = 0 }
                 ok = 0
-                IfCondition EqualTo(errs, 0) ThenBlock: { ok = 1 }
-                CCAlg_SendResult(client_fd, id, ok, errs, warns, 0, CCAilangState.out_buf)
+                IfCondition EqualTo(CCAilangState.last_exit, 0) ThenBlock: { ok = 1 }
+                CCAlg_SendResult(client_fd, id, ok, 0, CCAilangState.out_buf)
                 JSON.Free(parsed)
                 ReturnValue(0)
             }

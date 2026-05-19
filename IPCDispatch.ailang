@@ -38,6 +38,12 @@ FixedPool.IPCDState {
     "table":         Initialize=0, CanChange=True
     "count":         Initialize=0, CanChange=True
     "schemas_arr":   Initialize=0, CanChange=True   // cached JSON array of schemas
+    "proxy_listen_fd":  Initialize=-1, CanChange=True  // parent's AgentProxy listen socket
+    "proxy_clients":    Initialize=0,  CanChange=True  // 8-slot array of connected agent fds
+    "proxy_client_cnt": Initialize=0,  CanChange=True
+    "proxy_polling":    Initialize=0,  CanChange=True  // re-entrancy guard
+    "proxy_mode":       Initialize=0,  CanChange=True  // 1=agent worker, route all calls to parent
+    "proxy_conn_fd":    Initialize=-1, CanChange=True  // agent's connection to parent proxy
 }
 
 // =============================================================================
@@ -62,6 +68,234 @@ Function.IPCDispatch.Shutdown {
             i = Add(i, 1)
         }
         IPCDState.count = 0
+    }
+}
+
+// =============================================================================
+// AGENT PROXY — parent side
+// Opens @halcode/AgentProxy, accepts agent worker connections, routes tool
+// calls through the parent's already-open tool daemon connections.
+// =============================================================================
+
+// Open the proxy listen socket. Call once after CC_BootTools().
+Function.IPCDispatch.StartProxy {
+    Body: {
+        fd = Socket.Create(1, 1)
+        IfCondition LessThan(fd, 0) ThenBlock: {
+            IPCD_Log("[proxy] socket create failed\n")
+            ReturnValue(0)
+        }
+        rc = Socket.BindUnix(fd, "@halcode/AgentProxy")
+        IfCondition LessThan(rc, 0) ThenBlock: {
+            Socket.Close(fd)
+            IPCD_Log("[proxy] bind failed\n")
+            ReturnValue(0)
+        }
+        Socket.Listen(fd, 8)
+        Socket.SetNonBlock(fd)
+        IPCDState.proxy_listen_fd = fd
+        IPCDState.proxy_clients = Allocate(64)  // 8 × 8 bytes
+        _pi = 0
+        WhileLoop LessThan(_pi, 8) {
+            StoreValue(Add(IPCDState.proxy_clients, Multiply(_pi, 8)), -1)
+            _pi = Add(_pi, 1)
+        }
+        IPCDState.proxy_client_cnt = 0
+        IPCD_Log("[proxy] AgentProxy listening\n")
+    }
+}
+
+// Service any pending agent connections/requests. Non-blocking (timeout=0).
+// Call from idle loops: IPCDispatch.Dispatch poll, CC_SleepAnimated, etc.
+Function.IPCDispatch.PollProxy {
+    Body: {
+        // Re-entrancy guard: PollProxy → Dispatch → PollProxy would loop
+        IfCondition EqualTo(IPCDState.proxy_polling, 1) ThenBlock: { ReturnValue(0) }
+        IfCondition LessThan(IPCDState.proxy_listen_fd, 0) ThenBlock: { ReturnValue(0) }
+        IPCDState.proxy_polling = 1
+
+        // Build poll array: listen fd + up to 8 client fds
+        cnt = IPCDState.proxy_client_cnt
+        poll_sz = Add(cnt, 1)
+        pfd = Allocate(Multiply(poll_sz, 8))
+
+        // slot 0 = listen fd
+        StoreValue(pfd, IPCDState.proxy_listen_fd, "dword")
+        StoreValue(Add(pfd, 4), 1, "dword")  // POLLIN
+
+        _ci = 0
+        WhileLoop LessThan(_ci, cnt) {
+            cfd = Dereference(Add(IPCDState.proxy_clients, Multiply(_ci, 8)))
+            off = Multiply(Add(_ci, 1), 8)
+            StoreValue(Add(pfd, off), cfd, "dword")
+            StoreValue(Add(pfd, Add(off, 4)), 1, "dword")  // POLLIN
+            _ci = Add(_ci, 1)
+        }
+
+        pr = SystemCall(7, pfd, poll_sz, 0, 0, 0)  // SYS_POLL, timeout=0
+
+        // Check listen fd — accept new agent connections
+        // struct pollfd: fd(4) + events(2) + revents(2); revents is at byte offset 6
+        revents0 = GetByte(pfd, 6)
+        IfCondition GreaterThan(BitwiseAnd(revents0, 1), 0) ThenBlock: {
+            new_fd = Socket.Accept(IPCDState.proxy_listen_fd)
+            IfCondition GreaterEqual(new_fd, 0) ThenBlock: {
+                cur = IPCDState.proxy_client_cnt
+                IfCondition LessThan(cur, 8) ThenBlock: {
+                    StoreValue(Add(IPCDState.proxy_clients, Multiply(cur, 8)), new_fd)
+                    IPCDState.proxy_client_cnt = Add(cur, 1)
+                    IPCD_Log("[proxy] agent connected\n")
+                } ElseBlock: {
+                    Socket.Close(new_fd)
+                    IPCD_Log("[proxy] agent rejected (max 8 clients)\n")
+                }
+            }
+        }
+
+        // Check client fds — service ready requests
+        _si = 0
+        WhileLoop LessThan(_si, cnt) {
+            revents = GetByte(pfd, Add(Multiply(Add(_si, 1), 8), 6))
+            IfCondition GreaterThan(BitwiseAnd(revents, 1), 0) ThenBlock: {
+                cfd2 = Dereference(Add(IPCDState.proxy_clients, Multiply(_si, 8)))
+                Socket.SetRecvTimeout(cfd2, 2000)
+                req_str = Socket.RecvMsg(cfd2)
+                IfCondition EqualTo(req_str, 0) ThenBlock: {
+                    // Client disconnected — compact slot
+                    Socket.Close(cfd2)
+                    last = Subtract(IPCDState.proxy_client_cnt, 1)
+                    last_fd = Dereference(Add(IPCDState.proxy_clients, Multiply(last, 8)))
+                    StoreValue(Add(IPCDState.proxy_clients, Multiply(_si, 8)), last_fd)
+                    IPCDState.proxy_client_cnt = last
+                    IPCD_Log("[proxy] agent disconnected\n")
+                } ElseBlock: {
+                    // Parse and handle request
+                    _rp = ParseJSON(req_str)
+                    IfCondition NotEqual(_rp, 0) ThenBlock: {
+                        _ro = JSON.AsObject(_rp)
+                        IfCondition NotEqual(_ro, 0) ThenBlock: {
+                            _meth = JSON.GetString(_ro, "method")
+                            IfCondition And(NotEqual(_meth, 0), EqualTo(StringCompare(_meth, "schema"), 0)) ThenBlock: {
+                                // Return serialized schemas array
+                                _sarr = IPCDState.schemas_arr
+                                _sarr_str = JSON.SerializeArray(_sarr)
+                                _sresp = StringConcat("{\"method\":\"schema_response\",\"schemas\":", _sarr_str)
+                                _sresp = StringConcat(_sresp, "}")
+                                Socket.SendMsg(cfd2, _sresp)
+                                IPCD_Log("[proxy] schema sent to agent\n")
+                            }
+                            IfCondition And(NotEqual(_meth, 0), EqualTo(StringCompare(_meth, "call"), 0)) ThenBlock: {
+                                _tool = JSON.GetString(_ro, "tool")
+                                _rid  = JSON.GetString(_ro, "id")
+                                _args = JSON.GetObject(_ro, "args")
+                                _perr = Allocate(8)
+                                StoreValue(_perr, 0, "dword")
+                                _result = IPCDispatch.Dispatch(_tool, _args, _rid, _perr)
+                                _is_err = Dereference(_perr, "dword")
+                                Deallocate(_perr, 8)
+                                _rresp = JSON.NewObject()
+                                JSON.SetBool(_rresp, "ok", 1)
+                                IfCondition EqualTo(_is_err, 1) ThenBlock: { JSON.SetBool(_rresp, "ok", 0) }
+                                IfCondition NotEqual(_result, 0) ThenBlock: {
+                                    JSON.SetString(_rresp, "content", _result)
+                                }
+                                IfCondition NotEqual(_rid, 0) ThenBlock: {
+                                    JSON.SetString(_rresp, "id", _rid)
+                                }
+                                Socket.SendMsg(cfd2, JSON.SerializeObject(_rresp))
+                            }
+                        }
+                    }
+                }
+            }
+            _si = Add(_si, 1)
+        }
+
+        Deallocate(pfd, Multiply(poll_sz, 8))
+        IPCDState.proxy_polling = 0
+    }
+}
+
+// =============================================================================
+// AGENT PROXY — agent worker side
+// Connect to the parent's @halcode/AgentProxy, fetch all tool schemas,
+// register them in the local dispatch table with proxy_conn_fd.
+// Call instead of CC_RegisterToolsOnly in --agent mode.
+// =============================================================================
+Function.IPCDispatch.ConnectProxy {
+    Body: {
+        fd = Socket.Create(1, 1)
+        IfCondition LessThan(fd, 0) ThenBlock: {
+            IPCD_Log("[proxy-agent] socket create failed\n")
+            ReturnValue(0)
+        }
+        // Retry for up to 5 seconds (parent may still be booting)
+        _att = 0
+        _cr = -1
+        WhileLoop And(LessThan(_att, 50), LessThan(_cr, 0)) {
+            _cr = Socket.ConnectUnix(fd, "@halcode/AgentProxy")
+            IfCondition LessThan(_cr, 0) ThenBlock: {
+                Socket.Close(fd)
+                fd = Socket.Create(1, 1)
+                ts = Allocate(16)
+                StoreValue(Add(ts, 0), 0)
+                StoreValue(Add(ts, 8), 100000000)  // 100ms
+                SystemCall(35, ts, 0, 0, 0, 0)
+                Deallocate(ts, 16)
+                _att = Add(_att, 1)
+            }
+        }
+        IfCondition LessThan(_cr, 0) ThenBlock: {
+            Socket.Close(fd)
+            IPCD_Log("[proxy-agent] connect failed\n")
+            ReturnValue(0)
+        }
+        IPCDState.proxy_conn_fd = fd
+        IPCDState.proxy_mode = 1
+
+        // Request schemas
+        Socket.SendMsg(fd, "{\"method\":\"schema\"}")
+        Socket.SetRecvTimeout(fd, 10000)
+        _sresp = Socket.RecvMsg(fd)
+        IfCondition EqualTo(_sresp, 0) ThenBlock: {
+            IPCD_Log("[proxy-agent] no schema response\n")
+            ReturnValue(0)
+        }
+
+        // Parse: {"method":"schema_response","schemas":[...]}
+        _sp = ParseJSON(_sresp)
+        IfCondition EqualTo(_sp, 0) ThenBlock: { ReturnValue(0) }
+        _so = JSON.AsObject(_sp)
+        IfCondition EqualTo(_so, 0) ThenBlock: { ReturnValue(0) }
+        _sarr = JSON.GetArray(_so, "schemas")
+        IfCondition EqualTo(_sarr, 0) ThenBlock: {
+            IPCD_Log("[proxy-agent] no schemas in response\n")
+            ReturnValue(0)
+        }
+
+        // Register each schema as a fake tool entry pointing to proxy_conn_fd
+        _scount = JSON.ArrayLength(_sarr)
+        _si2 = 0
+        WhileLoop LessThan(_si2, _scount) {
+            _sch = JSON.AsObject(JSON.ArrayGet(_sarr, _si2))
+            IfCondition NotEqual(_sch, 0) ThenBlock: {
+                _tname2 = JSON.GetString(_sch, "name")
+                IfCondition NotEqual(_tname2, 0) ThenBlock: {
+                    idx2 = IPCDState.count
+                    base2 = Add(IPCDState.table, Multiply(idx2, IPCDConst.ENTRY_SIZE))
+                    StoreValue(Add(base2, IPCDOff.NAME),   _tname2)
+                    StoreValue(Add(base2, IPCDOff.FD),     fd)         // proxy fd
+                    StoreValue(Add(base2, IPCDOff.SCHEMA), _sch)
+                    StoreValue(Add(base2, IPCDOff.SOCK_PATH), 0)
+                    IPCDState.count = Add(idx2, 1)
+                    JSON.PushObject(IPCDState.schemas_arr, _sch)
+                }
+            }
+            _si2 = Add(_si2, 1)
+        }
+
+        IPCD_Log("[proxy-agent] connected, schemas loaded\n")
+        ReturnValue(1)
     }
 }
 
@@ -365,9 +599,13 @@ Function.IPCDispatch.Dispatch {
             ReturnValue(StringConcat("tool not registered: ", name))
         }
 
-        // Build request
+        // Build request. In proxy mode include "tool":name so the parent knows
+        // which daemon to forward to; direct-mode daemons don't need it.
         req = JSON.NewObject()
         JSON.SetString(req, "method", "call")
+        IfCondition EqualTo(IPCDState.proxy_mode, 1) ThenBlock: {
+            JSON.SetString(req, "tool", name)
+        }
         IfCondition NotEqual(tool_use_id, 0) ThenBlock: {
             JSON.SetString(req, "id", tool_use_id)
         }
@@ -378,10 +616,12 @@ Function.IPCDispatch.Dispatch {
 
         sr = Socket.SendMsg(fd, req_str)
         IfCondition LessThan(sr, 0) ThenBlock: {
-            IPCDispatch_Reconnect(name)
-            fd = IPCDispatch_FindFd(name)
-            IfCondition GreaterEqual(fd, 0) ThenBlock: {
-                sr = Socket.SendMsg(fd, req_str)
+            IfCondition EqualTo(IPCDState.proxy_mode, 0) ThenBlock: {
+                IPCDispatch_Reconnect(name)
+                fd = IPCDispatch_FindFd(name)
+                IfCondition GreaterEqual(fd, 0) ThenBlock: {
+                    sr = Socket.SendMsg(fd, req_str)
+                }
             }
             IfCondition LessThan(sr, 0) ThenBlock: {
                 StoreValue(out_is_error_ptr, 1, "dword")
@@ -389,13 +629,14 @@ Function.IPCDispatch.Dispatch {
             }
         }
 
-        // 60-second timeout. Tools doing real work (relmem indexing a
-        // big project, web fetches) get plenty of time. Hangs unblock.
-        // Track wall time so we can flag slow tools (>5s) for visibility
-        // without spamming chat for fast ones.
+        // Per-tool timeout. Default 60s covers real work (relmem indexing, web fetches)
+        // and unblocks hangs. Sleep is special: it intentionally waits up to 310s
+        // (300s max + 10s buffer) so agents can use Sleep seconds=300 safely.
+        tool_timeout = 60
+        IfCondition EqualTo(StringCompare(name, "Sleep"), 0) ThenBlock: { tool_timeout = 310 }
         t_start = SystemCall(201, 0, 0, 0, 0, 0)   // SYS_TIME — Unix epoch seconds
 
-        // Non-blocking poll loop to keep UI animations ticking
+        // Non-blocking poll loop: keep UI alive + service agent proxy requests
         pfd = Allocate(8)
         StoreValue(pfd, fd, "dword")
         StoreValue(Add(pfd, 4), 1, "dword") // POLLIN
@@ -403,8 +644,12 @@ Function.IPCDispatch.Dispatch {
             pr = SystemCall(7, pfd, 1, 15, 0, 0) // SYS_POLL = 7, 15ms timeout
             IfCondition NotEqual(pr, 0) ThenBlock: { BreakLoop }
             UI.AnimTick()
+            // While waiting for a tool result, service any pending agent requests
+            IfCondition EqualTo(IPCDState.proxy_mode, 0) ThenBlock: {
+                IPCDispatch.PollProxy()
+            }
             t_now = SystemCall(201, 0, 0, 0, 0, 0)
-            IfCondition GreaterEqual(Subtract(t_now, t_start), 60) ThenBlock: { BreakLoop }
+            IfCondition GreaterEqual(Subtract(t_now, t_start), tool_timeout) ThenBlock: { BreakLoop }
         }
         Deallocate(pfd, 8)
 
@@ -416,8 +661,8 @@ Function.IPCDispatch.Dispatch {
         IfCondition EqualTo(resp_str, 0) ThenBlock: {
             StoreValue(out_is_error_ptr, 1, "dword")
             IPCDispatch_Reconnect(name)
-            IfCondition GreaterEqual(elapsed, 60) ThenBlock: {
-                ReturnValue(StringConcat("tool TIMED OUT (60s): ", name))
+            IfCondition GreaterEqual(elapsed, tool_timeout) ThenBlock: {
+                ReturnValue(StringConcat("tool TIMED OUT: ", name))
             }
             ReturnValue(StringConcat("tool crashed or connection lost: ", name))
         }

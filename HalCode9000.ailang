@@ -208,6 +208,25 @@ Function.CC_SleepMs {
     }
 }
 
+// Non-blocking sleep: pumps UI animation each 16ms so the screen stays live
+// and ESC interrupts work during retry back-off delays.
+Function.CC_SleepAnimated {
+    Input: ms: Integer
+    Body: {
+        IfCondition LessEqual(ms, 0) ThenBlock: { ReturnValue(0) }
+        elapsed = 0
+        WhileLoop LessThan(elapsed, ms) {
+            UI.AnimTick()
+            IfCondition EqualTo(UILayout.interrupted, 1) ThenBlock: { ReturnValue(0) }
+            IfCondition EqualTo(IPCDState.proxy_mode, 0) ThenBlock: {
+                IPCDispatch.PollProxy()
+            }
+            CC_SleepMs(16)
+            elapsed = Add(elapsed, 16)
+        }
+    }
+}
+
 // Full-jitter helper: returns a random ms value in [0, max_ms].
 // Uses 2 bytes from /dev/urandom for 16-bit entropy.
 Function.CC_RandomMs {
@@ -978,13 +997,14 @@ Function.CC_RunTurn {
             chain_count = Add(chain_count, 1)
 
             // --- Retry Loop for API calls ---
-            max_retries = 30
+            max_retries = 3
             retry_count = 0
             request_ok = 0
             retry_delay_ms = 2000
             is_interrupted_turn = 0
+            permanent_fail = 0
 
-            WhileLoop And(LessThan(retry_count, max_retries), EqualTo(request_ok, 0)) {
+            WhileLoop And(And(LessThan(retry_count, max_retries), EqualTo(request_ok, 0)), EqualTo(permanent_fail, 0)) {
 
             CC_DebugLog("Building request...\n")
 
@@ -1059,7 +1079,7 @@ Function.CC_RunTurn {
             IfCondition EqualTo(handle, 0) ThenBlock: {
                 CC_DebugLog("HTTP.PostStream FAILED (curl spawn error).\n")
                 UI.ChatTag("✗", "HTTP request failed (curl spawn)", 1)
-                CC_SleepMs(CC_RandomMs(retry_delay_ms))
+                CC_SleepAnimated(CC_RandomMs(retry_delay_ms))
                 retry_delay_ms = Multiply(retry_delay_ms, 2)
                 IfCondition GreaterThan(retry_delay_ms, 30000) ThenBlock: { retry_delay_ms = 30000 }
                 retry_count = Add(retry_count, 1)
@@ -1134,6 +1154,22 @@ Function.CC_RunTurn {
                         UI.SetState(0)
                         UI.ChatTag("✗", "API Error (Rate Limit / Bad Request):", 1) // 1 = RED_FG
                     }
+                    // Catch permanent errors like "Failed to parse the request body" (non-retryable)
+                    // These start with 'F'=70 and indicate a broken request, not a transient drop.
+                    IfCondition And(EqualTo(is_api_error, 0), EqualTo(first_b, 70)) ThenBlock: {
+                        _f1 = GetByte(line_buf, 1)
+                        _f2 = GetByte(line_buf, 2)
+                        _f3 = GetByte(line_buf, 3)
+                        _f4 = GetByte(line_buf, 4)
+                        _f5 = GetByte(line_buf, 5)
+                        // "Failed" = 70 97 105 108 101 100
+                        IfCondition And(And(EqualTo(_f1, 97), EqualTo(_f2, 105)), And(EqualTo(_f3, 108), EqualTo(_f4, 101))) ThenBlock: {
+                            is_api_error = 1
+                            permanent_fail = 1
+                            UI.SetState(0)
+                            UI.ChatTag("✗", "Permanent API error (bad request — fix and retry):", 1)
+                        }
+                    }
                     
                     IfCondition EqualTo(is_api_error, 1) ThenBlock: {
                         IfCondition GreaterThan(line_len, 0) ThenBlock: {
@@ -1168,14 +1204,17 @@ Function.CC_RunTurn {
             IfCondition And(EqualTo(clean_stop, 0), EqualTo(is_api_error, 0)) ThenBlock: {
                 IfCondition EqualTo(is_interrupted_turn, 1) ThenBlock: {
                     UI.ChatTag("✗", "Turn interrupted by user.", 3) // 3 = ORANGE_FG
-                    
+
                     user_msg = UI.ConsumeInterrupt()
-                    UI.ChatTag("›", user_msg, 6) // 6 = CYAN_FG
-                    History.AppendUser(user_msg)
-                    Deallocate(user_msg, Add(StringLength(user_msg), 1))
-                    
-                    // Sever the turn and command the outer loop to start a fresh API call
-                    keep_going = 1
+                    msg_len = StringLength(user_msg)
+                    IfCondition GreaterThan(msg_len, 0) ThenBlock: {
+                        // User typed steering text during stream — send as next user turn
+                        UI.ChatTag("›", user_msg, 6)
+                        History.AppendUser(user_msg)
+                        keep_going = 1
+                    }
+                    // Bare ESC (no text): keep_going stays 0 — stop cleanly
+                    Deallocate(user_msg, Add(msg_len, 1))
                     BreakLoop
                 } ElseBlock: {
                     CC_DebugLog("API stream DROPPED without clean stop.\n")
@@ -1195,7 +1234,7 @@ Function.CC_RunTurn {
                 CC_DebugLog("\n")
                 retry_count = Add(retry_count, 1)
                 IfCondition LessThan(retry_count, max_retries) ThenBlock: {
-                    CC_SleepMs(CC_RandomMs(retry_delay_ms))
+                    CC_SleepAnimated(CC_RandomMs(retry_delay_ms))
                     retry_delay_ms = Multiply(retry_delay_ms, 2)
                     IfCondition GreaterThan(retry_delay_ms, 30000) ThenBlock: { retry_delay_ms = 30000 }
                     Backend.Reset()
@@ -1211,7 +1250,9 @@ Function.CC_RunTurn {
             UI.SetState(2)
             UI.ChatPrintln("")
             IfCondition EqualTo(request_ok, 0) ThenBlock: {
-                UI.ChatTag("✗", "All retries exhausted. Any completed tool work is in /tmp/hal_turn_log.txt", 1)
+                IfCondition EqualTo(is_interrupted_turn, 0) ThenBlock: {
+                    UI.ChatTag("✗", "All retries exhausted. Any completed tool work is in /tmp/hal_turn_log.txt", 1)
+                }
             }
 
             // Only commit to history and dispatch tools if the final request was successful
@@ -2151,6 +2192,7 @@ Function.CC_ChatLoop {
                 }
                 IfCondition EqualTo(StringCompare(line, "/clear"), 0) ThenBlock: {
                     History.Init()
+                    ChatLog_Rotate()
                     UI.Shutdown()
                     UI.Init()
                     UI.SessionHeader(0, 0, 0)
@@ -2175,9 +2217,100 @@ Function.CC_ChatLoop {
                         UI.ChatTag("✓", "Autonomous mode OFF — will pause after 25 tool calls.", 3)
                     }
                 }
+                // /tools — toggle tool call display (compact summary vs expanded per-call)
+                IfCondition EqualTo(StringCompare(line, "/tools"), 0) ThenBlock: {
+                    IfCondition EqualTo(UILayout.show_tools, 0) ThenBlock: {
+                        UILayout.show_tools = 1
+                        UI.ChatTag("✓", "Tool display: expanded — each tool shown as it runs. [T] in hint row.", 2)
+                    } ElseBlock: {
+                        UILayout.show_tools = 0
+                        UI.ChatTag("✓", "Tool display: compact — summary line shows names (e.g. ✓ Bash · Read · Write).", 8)
+                    }
+                }
                 // /project — show current project info
                 IfCondition EqualTo(StringCompare(line, "/project"), 0) ThenBlock: {
                     CC_ProjectCommand()
+                    _pslug = UILayout.proj_slug
+                    _tslug = UILayout.thread_slug
+                    _has_p = 0
+                    IfCondition And(NotEqual(_pslug, 0), GreaterThan(StringLength(_pslug), 0)) ThenBlock: {
+                        _has_p = 1
+                    }
+                    IfCondition EqualTo(_has_p, 1) ThenBlock: {
+                        _has_t = 0
+                        IfCondition And(NotEqual(_tslug, 0), GreaterThan(StringLength(_tslug), 0)) ThenBlock: {
+                            _has_t = 1
+                        }
+                        IfCondition EqualTo(_has_t, 1) ThenBlock: {
+                            UI.ChatTag("·", StringConcat("Context: ", StringConcat(_pslug, StringConcat("/", _tslug))), 8)
+                        } ElseBlock: {
+                            UI.ChatTag("·", StringConcat("Context: ", _pslug), 8)
+                        }
+                    } ElseBlock: {
+                        UI.ChatPrintln("  No project set. Use /project <name> or /thread <name>.")
+                    }
+                }
+                // /project <name> — set project slug and persist to Pgmem
+                IfCondition GreaterThan(StringLength(line), 9) ThenBlock: {
+                    _pp_pfx = Allocate(10)
+                    _pp_k = 0
+                    WhileLoop LessThan(_pp_k, 9) {
+                        SetByte(_pp_pfx, _pp_k, GetByte(line, _pp_k))
+                        _pp_k = Add(_pp_k, 1)
+                    }
+                    SetByte(_pp_pfx, 9, 0)
+                    IfCondition EqualTo(StringCompare(_pp_pfx, "/project "), 0) ThenBlock: {
+                        _pname = Add(line, 9)
+                        UI.SetProjectThread(_pname, 0)
+                        _pp_args = JSON.NewObject()
+                        JSON.SetString(_pp_args, "op", "park")
+                        JSON.SetString(_pp_args, "key", "ui.proj_slug")
+                        JSON.SetString(_pp_args, "kind", "config")
+                        JSON.SetString(_pp_args, "content", _pname)
+                        JSON.SetString(_pp_args, "scope", "persistent")
+                        _pp_perr = Allocate(8)
+                        StoreValue(_pp_perr, 0, "dword")
+                        IPCDispatch.Dispatch("Pgmem", _pp_args, 0, _pp_perr)
+                        Deallocate(_pp_perr, 8)
+                        UI.ChatTag("✓", StringConcat("Project: ", _pname), 2)
+                    }
+                    Deallocate(_pp_pfx, 10)
+                }
+                // /thread — show current thread slug
+                IfCondition EqualTo(StringCompare(line, "/thread"), 0) ThenBlock: {
+                    _tslug2 = UILayout.thread_slug
+                    _pslug2 = UILayout.proj_slug
+                    IfCondition And(NotEqual(_tslug2, 0), GreaterThan(StringLength(_tslug2), 0)) ThenBlock: {
+                        UI.ChatTag("·", StringConcat("Thread: ", _tslug2), 8)
+                    } ElseBlock: {
+                        UI.ChatPrintln("  No thread set. Use /thread <name> to set.")
+                    }
+                }
+                // /thread <name> — set thread slug and persist to Pgmem
+                IfCondition GreaterThan(StringLength(line), 8) ThenBlock: {
+                    _th_pfx = Allocate(9)
+                    _th_k = 0
+                    WhileLoop LessThan(_th_k, 8) {
+                        SetByte(_th_pfx, _th_k, GetByte(line, _th_k))
+                        _th_k = Add(_th_k, 1)
+                    }
+                    SetByte(_th_pfx, 8, 0)
+                    IfCondition EqualTo(StringCompare(_th_pfx, "/thread "), 0) ThenBlock: {
+                        _tname = Add(line, 8)
+                        UI.SetProjectThread(0, _tname)
+                        _th_args = JSON.NewObject()
+                        JSON.SetString(_th_args, "op", "park")
+                        JSON.SetString(_th_args, "key", "ui.thread_slug")
+                        JSON.SetString(_th_args, "kind", "config")
+                        JSON.SetString(_th_args, "content", _tname)
+                        JSON.SetString(_th_args, "scope", "persistent")
+                        _th_perr = Allocate(8)
+                        StoreValue(_th_perr, 0, "dword")
+                        IPCDispatch.Dispatch("Pgmem", _th_args, 0, _th_perr)
+                        Deallocate(_th_perr, 8)
+                        UI.ChatTag("✓", StringConcat("Thread: ", _tname), 2)
+                    }
+                    Deallocate(_th_pfx, 9)
                 }
                 // /sysprompt — show/set/clear/apply the per-project system prompt addon
                 IfCondition EqualTo(StringCompare(line, "/sysprompt"), 0) ThenBlock: {
@@ -2588,7 +2721,7 @@ Function.CC_RegisterToolsOnly {
     Body: {
         CCRunState.child_pids = Allocate(Multiply(CCConst.MAX_CHILDREN, 8))
         CCRunState.child_count = 0
-        CC_LoadManifest("./cc_tools.json", 0)
+        IPCDispatch.ConnectProxy()
     }
 }
 
@@ -2975,7 +3108,7 @@ SubRoutine.Main {
         CC_AgentLog("[init] CC_SetupAgentProvider")
         cred = CC_SetupAgentProvider(agent_spec)
         CC_AgentLog("[init] SYSTEM_PROMPT assign")
-        CCConst.SYSTEM_PROMPT = "You are HAL Code 9000. Be concise. WSL2 RULES: (1) NEVER use find with / or /mnt or Windows paths. (2) Use Relmem op=symbols to locate files. (3) Scope find to specific subdirectories. (4) Pipe unbounded output through head/grep/tail. (5) NEVER call Relmem op=index on broad paths. (6) Use Pgmem op=\"search\" to extract parked data, DO NOT use op=\"pickup\". (7) Max 25 tool chains in a row, then ask user. (8) BLOCKED COMMANDS: sudo, rm, mv, dd, kill, killall, pkill, crontab, and piping to sh/bash are all forbidden. (9) AILang: run `./ailang.x src.ailang dest.x` and `./analyzer.x src.ailang` via Bash to check syntax. (10) VCS: use Olympus tool (snapshot, review, log, info, init) for compound workflows; use Git tool for raw git subcommands. (11) Write tool: use absolute paths. If grandparent missing, use Bash mkdir -p. For files >200 lines, use Bash `cat << 'EOF' > file`. (12) Write tool blocks /etc, /proc, /sys, /dev, /bin, /usr. (13) NO UNSOLICITED EDITS: never modify files unless explicitly asked — read-only exploration (Read, Head, Grep, Find, Stat, Wc, Du, Diff, LS, Git) is always OK without asking. (14) TOOL ERRORS: recheck your own parameters first — most errors are bad inputs not broken tools; retry with corrected params before reporting the tool as broken. (15) GREP: when path is a directory you MUST pass recursive=1; the include glob (e.g. *.ailang) only applies in recursive mode. (16) AGENT: always pass task_id (use the pgmem task ID from op=task_create) so the daemon can call task_end and mark the task complete; omitting task_id leaves the task stuck in pending forever. (17) AGENT WAITING: after spawning agents call `Sleep seconds=90` (the Sleep tool) then check Pgmem ONCE per wait cycle — NEVER use Bash sleep or poll Pgmem in a loop; the Sleep tool is the ONLY safe wait mechanism because it does not touch Pgmem; Pgmem is single-threaded and each pickup call holds the socket, blocking the agent daemon from parking its result and calling task_end, which causes a deadlock that kills the agent with a timeout. (18) SKILLS: at session start call `Skills op=list` to see available skill sheets, then load relevant ones with `Skills op=read name=<skill>` — each sheet gives focused instructions for a specific task domain. Load before starting work, not after getting stuck. (19) EDIT vs WRITE: for existing files always prefer Edit (exact string replace, sends only the diff) over Write (overwrites whole file); use Write only for new files or complete rewrites. (20) PGMEM HOT CACHE: after any turn where you used a tool or reached a decision, call Pgmem op=set scope=persistent key=working_state content=\"<current task | key files touched | decisions made | next step — max 400 chars>\". At session start, call Pgmem op=get key=working_state to orient yourself before doing anything. (21) PROJECT MAP: maintain a compact project directory in Pgmem — call Pgmem op=set scope=persistent key=project_map content=\"<active dirs, key files and what they do — max 600 chars>\" whenever you discover new structure or files. (22) SESSION LOG: every conversation is saved in full (user messages, thinking, responses, all tool calls and results) to ~/.halcode/logs/session_<timestamp>.txt. On crash or resume request, use the Read tool on the most recent file in that directory to reconstruct full context."
+        CCConst.SYSTEM_PROMPT = "You are HAL Code 9000, a headless tool-using agent. FUNCTION CALLS ONLY: Tools are registered via the function call API. Invoke them using function calls — NEVER describe actions in text and NEVER write XML or angle-bracket tool syntax like <read><path>...</path></read>. Call the function directly and wait for the result. WSL2 RULES: (1) NEVER use find with / or /mnt or Windows paths. (2) Use Relmem op=symbols to locate files. (3) Scope find to specific subdirectories. (4) Pipe unbounded output through head/grep/tail. (5) NEVER call Relmem op=index on broad paths. (6) Use Pgmem op=\"search\" to discover parked data; use op=\"pickup\" only for exact known keys (e.g. working_state, project_map). (7) Max 25 tool chains in a row, then ask user. (8) BLOCKED COMMANDS: sudo, rm, mv, dd, kill, killall, pkill, crontab, and piping to sh/bash are all forbidden. (9) AILang: run `./ailang.x src.ailang dest.x` and `./analyzer.x src.ailang` via Bash to check syntax. (10) VCS: use Olympus tool (snapshot, review, log, info, init) for compound workflows; use Git tool for raw git subcommands. (11) Write tool: use absolute paths. If grandparent missing, use Bash mkdir -p. For files >200 lines, use Bash `cat << 'EOF' > file`. (12) Write tool blocks /etc, /proc, /sys, /dev, /bin, /usr. (13) NO UNSOLICITED EDITS: never modify files unless explicitly asked — read-only exploration (Read, Head, Grep, Find, Stat, Wc, Du, Diff, LS, Git) is always OK without asking. (14) TOOL ERRORS: recheck your own parameters first — most errors are bad inputs not broken tools; retry with corrected params before reporting the tool as broken. (15) GREP: when path is a directory you MUST pass recursive=1; the include glob (e.g. *.ailang) only applies in recursive mode. (16) AGENT: always pass task_id (use the pgmem task ID from op=task_create) so the daemon can call task_end and mark the task complete; omitting task_id leaves the task stuck in pending forever. (17) AGENT WAITING: after spawning agents call `Sleep seconds=90` (the Sleep tool) then check Pgmem ONCE per wait cycle — NEVER use Bash sleep or poll Pgmem in a loop; the Sleep tool is the ONLY safe wait mechanism because it does not touch Pgmem; Pgmem is single-threaded and each pickup call holds the socket, blocking the agent daemon from parking its result and calling task_end, which causes a deadlock that kills the agent with a timeout. (18) SKILLS: at session start call `Skills op=list` to see available skill sheets, then load relevant ones with `Skills op=read name=<skill>` — each sheet gives focused instructions for a specific task domain. Load before starting work, not after getting stuck. (19) EDIT vs WRITE: for existing files always prefer Edit (exact string replace, sends only the diff) over Write (overwrites whole file); use Write only for new files or complete rewrites. (20) PGMEM HOT CACHE: after any turn where you used a tool or reached a decision, call Pgmem op=park scope=persistent key=working_state content=\"<current task | key files touched | decisions made | next step — max 400 chars>\". At session start, call Pgmem op=pickup key=working_state to orient yourself before doing anything. (21) PROJECT MAP: maintain a compact project directory in Pgmem — call Pgmem op=park scope=persistent key=project_map content=\"<active dirs, key files and what they do — max 600 chars>\" whenever you discover new structure or files. (22) SESSION LOG: every conversation is saved in full (user messages, thinking, responses, all tool calls and results) to ~/.halcode/logs/session_<timestamp>.txt. On crash or resume request, use the Read tool on the most recent file in that directory to reconstruct full context. (23) CONTEXT PRESSURE: when input_tokens exceeds ~115000 (65% of 180K window), park a curated checkpoint: call Pgmem op=park scope=persistent key=chat:<proj>:<thread>:checkpoint:<N> content=\"<key decisions, files modified, current task, critical state, next step — max 1200 chars>\". Increment N from the previous checkpoint number (start at 1 if none). Then tell the user: 'Context at N% — checkpoint parked.' Do this once when crossing the threshold, not on every turn. (24) PROJECT THREAD MEMORY: use key prefix chat:<proj>:<thread>: for project-specific state (e.g. chat:halcode/ui-work:turn:7). Active project and thread are set with /project <name> and /thread <name> — they appear in the rule row. To read active context: Pgmem op=pickup key=ui.proj_slug and key=ui.thread_slug. For important turn results: retrieve the seq counter via op=pickup key=chat:<proj>:<thread>:__seq__, increment it, park back as the same key, then park the turn content at key=chat:<proj>:<thread>:turn:<N>."
         CC_AgentLog("[init] History.Init")
         History.Init()
         CC_AgentLog("[init] IPCDispatch.Init")
@@ -3010,7 +3143,7 @@ SubRoutine.Main {
     // Tool registration logs print via PrintMessage; both happen before
     // we grab the screen.
 
-    CCConst.SYSTEM_PROMPT = "You are HAL Code 9000. Be concise. WSL2 RULES: (1) NEVER use find with / or /mnt or Windows paths. (2) Use Relmem op=symbols to locate files. (3) Scope find to specific subdirectories. (4) Pipe unbounded output through head/grep/tail. (5) NEVER call Relmem op=index on broad paths. (6) Use Pgmem op=\"search\" to extract parked data, DO NOT use op=\"pickup\". (7) Max 25 tool chains in a row, then ask user. (8) BLOCKED COMMANDS: sudo, rm, mv, dd, kill, killall, pkill, crontab, and piping to sh/bash are all forbidden. (9) AILang: run `./ailang.x src.ailang dest.x` and `./analyzer.x src.ailang` via Bash to check syntax. (10) VCS: use Olympus tool (snapshot, review, log, info, init) for compound workflows; use Git tool for raw git subcommands. (11) Write tool: use absolute paths. If grandparent missing, use Bash mkdir -p. For files >200 lines, use Bash `cat << 'EOF' > file`. (12) Write tool blocks /etc, /proc, /sys, /dev, /bin, /usr. (13) NO UNSOLICITED EDITS: never modify files unless explicitly asked — read-only exploration (Read, Head, Grep, Find, Stat, Wc, Du, Diff, LS, Git) is always OK without asking. (14) TOOL ERRORS: recheck your own parameters first — most errors are bad inputs not broken tools; retry with corrected params before reporting the tool as broken. (15) GREP: when path is a directory you MUST pass recursive=1; the include glob (e.g. *.ailang) only applies in recursive mode. (16) AGENT: always pass task_id (use the pgmem task ID from op=task_create) so the daemon can call task_end and mark the task complete; omitting task_id leaves the task stuck in pending forever. (17) AGENT WAITING: after spawning agents call `Sleep seconds=90` (the Sleep tool) then check Pgmem ONCE per wait cycle — NEVER use Bash sleep or poll Pgmem in a loop; the Sleep tool is the ONLY safe wait mechanism because it does not touch Pgmem; Pgmem is single-threaded and each pickup call holds the socket, blocking the agent daemon from parking its result and calling task_end, which causes a deadlock that kills the agent with a timeout. (18) SKILLS: at session start call `Skills op=list` to see available skill sheets, then load relevant ones with `Skills op=read name=<skill>` — each sheet gives focused instructions for a specific task domain. Load before starting work, not after getting stuck. (19) EDIT vs WRITE: for existing files always prefer Edit (exact string replace, sends only the diff) over Write (overwrites whole file); use Write only for new files or complete rewrites. (20) PGMEM HOT CACHE: after any turn where you used a tool or reached a decision, call Pgmem op=set scope=persistent key=working_state content=\"<current task | key files touched | decisions made | next step — max 400 chars>\". At session start, call Pgmem op=get key=working_state to orient yourself before doing anything. (21) PROJECT MAP: maintain a compact project directory in Pgmem — call Pgmem op=set scope=persistent key=project_map content=\"<active dirs, key files and what they do — max 600 chars>\" whenever you discover new structure or files. (22) SESSION LOG: every conversation is saved in full (user messages, thinking, responses, all tool calls and results) to ~/.halcode/logs/session_<timestamp>.txt. On crash or resume request, use the Read tool on the most recent file in that directory to reconstruct full context."
+    CCConst.SYSTEM_PROMPT = "You are HAL Code 9000. Be concise. WSL2 RULES: (1) NEVER use find with / or /mnt or Windows paths. (2) Use Relmem op=symbols to locate files. (3) Scope find to specific subdirectories. (4) Pipe unbounded output through head/grep/tail. (5) NEVER call Relmem op=index on broad paths. (6) Use Pgmem op=\"search\" to discover parked data; use op=\"pickup\" only for exact known keys (e.g. working_state, project_map). (7) Max 25 tool chains in a row, then ask user. (8) BLOCKED COMMANDS: sudo, rm, mv, dd, kill, killall, pkill, crontab, and piping to sh/bash are all forbidden. (9) AILang: run `./ailang.x src.ailang dest.x` and `./analyzer.x src.ailang` via Bash to check syntax. (10) VCS: use Olympus tool (snapshot, review, log, info, init) for compound workflows; use Git tool for raw git subcommands. (11) Write tool: use absolute paths. If grandparent missing, use Bash mkdir -p. For files >200 lines, use Bash `cat << 'EOF' > file`. (12) Write tool blocks /etc, /proc, /sys, /dev, /bin, /usr. (13) NO UNSOLICITED EDITS: never modify files unless explicitly asked — read-only exploration (Read, Head, Grep, Find, Stat, Wc, Du, Diff, LS, Git) is always OK without asking. (14) TOOL ERRORS: recheck your own parameters first — most errors are bad inputs not broken tools; retry with corrected params before reporting the tool as broken. (15) GREP: when path is a directory you MUST pass recursive=1; the include glob (e.g. *.ailang) only applies in recursive mode. (16) AGENT: always pass task_id (use the pgmem task ID from op=task_create) so the daemon can call task_end and mark the task complete; omitting task_id leaves the task stuck in pending forever. (17) AGENT WAITING: after spawning agents call `Sleep seconds=90` (the Sleep tool) then check Pgmem ONCE per wait cycle — NEVER use Bash sleep or poll Pgmem in a loop; the Sleep tool is the ONLY safe wait mechanism because it does not touch Pgmem; Pgmem is single-threaded and each pickup call holds the socket, blocking the agent daemon from parking its result and calling task_end, which causes a deadlock that kills the agent with a timeout. (18) SKILLS: at session start call `Skills op=list` to see available skill sheets, then load relevant ones with `Skills op=read name=<skill>` — each sheet gives focused instructions for a specific task domain. Load before starting work, not after getting stuck. (19) EDIT vs WRITE: for existing files always prefer Edit (exact string replace, sends only the diff) over Write (overwrites whole file); use Write only for new files or complete rewrites. (20) PGMEM HOT CACHE: after any turn where you used a tool or reached a decision, call Pgmem op=park scope=persistent key=working_state content=\"<current task | key files touched | decisions made | next step — max 400 chars>\". At session start, call Pgmem op=pickup key=working_state to orient yourself before doing anything. (21) PROJECT MAP: maintain a compact project directory in Pgmem — call Pgmem op=park scope=persistent key=project_map content=\"<active dirs, key files and what they do — max 600 chars>\" whenever you discover new structure or files. (22) SESSION LOG: every conversation is saved in full (user messages, thinking, responses, all tool calls and results) to ~/.halcode/logs/session_<timestamp>.txt. On crash or resume request, use the Read tool on the most recent file in that directory to reconstruct full context. (23) CONTEXT PRESSURE: when input_tokens exceeds ~115000 (65% of 180K window), park a curated checkpoint: call Pgmem op=park scope=persistent key=chat:<proj>:<thread>:checkpoint:<N> content=\"<key decisions, files modified, current task, critical state, next step — max 1200 chars>\". Increment N from the previous checkpoint number (start at 1 if none). Then tell the user: 'Context at N% — checkpoint parked.' Do this once when crossing the threshold, not on every turn. (24) PROJECT THREAD MEMORY: use key prefix chat:<proj>:<thread>: for project-specific state (e.g. chat:halcode/ui-work:turn:7). Active project and thread are set with /project <name> and /thread <name> — they appear in the rule row. To read active context: Pgmem op=pickup key=ui.proj_slug and key=ui.thread_slug. For important turn results: retrieve the seq counter via op=pickup key=chat:<proj>:<thread>:__seq__, increment it, park back as the same key, then park the turn content at key=chat:<proj>:<thread>:turn:<N>."
 
     CC_ChdirToBinDir()
     CC_KillStaleTools()
@@ -3020,6 +3153,7 @@ SubRoutine.Main {
     History.Init()
     IPCDispatch.Init()
     CC_BootTools()
+    IPCDispatch.StartProxy()
 
     // Outer loop: /home returns here to pick a different provider without restarting.
     // auth_result == 0 means user quit from the provider menu — exit immediately.
@@ -3039,6 +3173,8 @@ SubRoutine.Main {
             Backend.Init(auth_mode_str, credential, CC_BuildFullPrompt())
 
             // Now grab the terminal — auth is done, no more cooked-mode prints.
+            // Rotate previous session's chat log before opening a new one.
+            ChatLog_Rotate()
             UI.Init()
 
             // Enable Terminal Bracketed Paste (\e[?2004h)
@@ -3048,6 +3184,35 @@ SubRoutine.Main {
             Deallocate(bp_on, 16)
 
             UI.BootScroll()
+
+            // Restore project/thread context from previous session via Pgmem
+            _rp_args = JSON.NewObject()
+            JSON.SetString(_rp_args, "op", "pickup")
+            JSON.SetString(_rp_args, "key", "ui.proj_slug")
+            _rp_perr = Allocate(8)
+            StoreValue(_rp_perr, 0, "dword")
+            _rp_resp = IPCDispatch.Dispatch("Pgmem", _rp_args, 0, _rp_perr)
+            _rp_err = Dereference(_rp_perr, "dword")
+            Deallocate(_rp_perr, 8)
+            _rt_args = JSON.NewObject()
+            JSON.SetString(_rt_args, "op", "pickup")
+            JSON.SetString(_rt_args, "key", "ui.thread_slug")
+            _rt_perr = Allocate(8)
+            StoreValue(_rt_perr, 0, "dword")
+            _rt_resp = IPCDispatch.Dispatch("Pgmem", _rt_args, 0, _rt_perr)
+            _rt_err = Dereference(_rt_perr, "dword")
+            Deallocate(_rt_perr, 8)
+            IfCondition EqualTo(_rp_err, 0) ThenBlock: {
+                IfCondition And(NotEqual(_rp_resp, 0), GreaterThan(StringLength(_rp_resp), 0)) ThenBlock: {
+                    _rt_val = 0
+                    IfCondition EqualTo(_rt_err, 0) ThenBlock: {
+                        IfCondition And(NotEqual(_rt_resp, 0), GreaterThan(StringLength(_rt_resp), 0)) ThenBlock: {
+                            _rt_val = _rt_resp
+                        }
+                    }
+                    UI.SetProjectThread(_rp_resp, _rt_val)
+                }
+            }
 
             // Compact in-chat session header — small mascot + version/model/cwd
             UI.SessionHeader(0, 0, 0)
