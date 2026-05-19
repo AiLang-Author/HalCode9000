@@ -80,6 +80,7 @@ FixedPool.UILayout {
     "last_anim_ms":  Initialize=0, CanChange=True
     "reasoning_str": Initialize=0, CanChange=True
     "in_paste":      Initialize=0, CanChange=True
+    "cursor_col":    Initialize=0, CanChange=True  // insertion point within input_buf (0..input_len)
     "think_start_ms":    Initialize=0, CanChange=True
     "think_elapsed_sec": Initialize=0, CanChange=True
     "active_tool":       Initialize=0, CanChange=True
@@ -627,6 +628,7 @@ Function.UI_PaintHint {
 }
 
 // Re-render `len` bytes from input_buf at the body row.
+// Leaves the terminal cursor at UILayout.cursor_col (the insertion point).
 Function.UI_RenderInput {
     Input: len: Integer
     Body: {
@@ -637,10 +639,18 @@ Function.UI_RenderInput {
 
         curr_row = 0
         curr_col = 0
+        // Saved terminal position for the cursor (initialise to start).
+        cur_r = r
+        cur_c = start_col
         TUI_MoveTo(r, start_col)
 
         i = 0
         WhileLoop LessThan(i, len) {
+            // Capture terminal position just before processing cursor_col byte.
+            IfCondition EqualTo(i, UILayout.cursor_col) ThenBlock: {
+                cur_r = Add(r, curr_row)
+                cur_c = Add(start_col, curr_col)
+            }
             ch = GetByte(UILayout.input_buf, i)
             IfCondition Or(EqualTo(ch, 10), EqualTo(ch, 13)) ThenBlock: {
                 TUI_BufferChar(27) TUI_BufferWriteStr("[K")
@@ -664,8 +674,15 @@ Function.UI_RenderInput {
             i = Add(i, 1)
         }
 
+        // If cursor_col == len (end of buffer), capture position now.
+        IfCondition EqualTo(UILayout.cursor_col, len) ThenBlock: {
+            cur_r = Add(r, curr_row)
+            cur_c = Add(start_col, curr_col)
+        }
+
         TUI_BufferChar(27) TUI_BufferWriteStr("[K")
-        TUI_MoveTo(Add(r, curr_row), Add(start_col, curr_col))
+        // Place terminal cursor at the insertion point.
+        TUI_MoveTo(cur_r, cur_c)
     }
 }
 
@@ -1385,25 +1402,62 @@ Function.UI.PumpInput {
             IfCondition Or(EqualTo(key, 10), EqualTo(key, 13)) ThenBlock: {
                 IfCondition GreaterThan(len, 0) ThenBlock: {
                     SetByte(UILayout.input_buf, len, 0)
+                    UILayout.cursor_col = len
                     UILayout.interrupted = 1
                     dirty = 1
                     BreakLoop
                 }
             } ElseBlock: {
                 IfCondition Or(EqualTo(key, TUI_Keys.KEY_BACKSPACE), EqualTo(key, 8)) ThenBlock: {
-                    IfCondition GreaterThan(len, 0) ThenBlock: {
+                    IfCondition GreaterThan(UILayout.cursor_col, 0) ThenBlock: {
+                        _bs_i = Subtract(UILayout.cursor_col, 1)
+                        WhileLoop LessThan(_bs_i, Subtract(len, 1)) {
+                            SetByte(UILayout.input_buf, _bs_i, GetByte(UILayout.input_buf, Add(_bs_i, 1)))
+                            _bs_i = Add(_bs_i, 1)
+                        }
                         len = Subtract(len, 1)
                         SetByte(UILayout.input_buf, len, 0)
+                        UILayout.cursor_col = Subtract(UILayout.cursor_col, 1)
                         dirty = 1
                     }
                 } ElseBlock: {
+                    IfCondition EqualTo(key, TUI_Keys.KEY_LEFT) ThenBlock: {
+                        IfCondition GreaterThan(UILayout.cursor_col, 0) ThenBlock: {
+                            UILayout.cursor_col = Subtract(UILayout.cursor_col, 1)
+                            dirty = 1
+                        }
+                    } ElseBlock: {
+                    IfCondition EqualTo(key, TUI_Keys.KEY_RIGHT) ThenBlock: {
+                        IfCondition LessThan(UILayout.cursor_col, len) ThenBlock: {
+                            UILayout.cursor_col = Add(UILayout.cursor_col, 1)
+                            dirty = 1
+                        }
+                    } ElseBlock: {
+                    IfCondition EqualTo(key, TUI_Keys.KEY_HOME) ThenBlock: {
+                        UILayout.cursor_col = 0
+                        dirty = 1
+                    } ElseBlock: {
+                    IfCondition EqualTo(key, TUI_Keys.KEY_END) ThenBlock: {
+                        UILayout.cursor_col = len
+                        dirty = 1
+                    } ElseBlock: {
                     IfCondition And(GreaterEqual(key, 32), LessThan(key, 127)) ThenBlock: {
                         IfCondition LessThan(len, Subtract(UILayout.input_cap, 1)) ThenBlock: {
-                            SetByte(UILayout.input_buf, len, key)
+                            _ci = len
+                            WhileLoop GreaterThan(_ci, UILayout.cursor_col) {
+                                SetByte(UILayout.input_buf, _ci, GetByte(UILayout.input_buf, Subtract(_ci, 1)))
+                                _ci = Subtract(_ci, 1)
+                            }
+                            SetByte(UILayout.input_buf, UILayout.cursor_col, key)
+                            UILayout.cursor_col = Add(UILayout.cursor_col, 1)
                             len = Add(len, 1)
                             SetByte(UILayout.input_buf, len, 0)
                             dirty = 1
                         }
+                    }
+                    }
+                    }
+                    }
                     }
                 }
             }
@@ -1428,6 +1482,7 @@ Function.UI.ReadLine {
     Body: {
         len = UILayout.input_len
         SetByte(UILayout.input_buf, len, 0)
+        UILayout.cursor_col = len   // start with cursor at end of any pre-existing text
         UILayout.ui_state = 0
         req_lines = UI_CalcInputLines(len)
         changed = UI_AdjustPromptHeight(req_lines)
@@ -1502,13 +1557,50 @@ Function.UI.ReadLine {
                 ContinueLoop
             }
 
+            // ── Cursor movement ──────────────────────────────────────────
+            IfCondition EqualTo(key, TUI_Keys.KEY_LEFT) ThenBlock: {
+                IfCondition GreaterThan(UILayout.cursor_col, 0) ThenBlock: {
+                    UILayout.cursor_col = Subtract(UILayout.cursor_col, 1)
+                    UI_RenderInput(len)
+                    TUI_Refresh()
+                }
+                ContinueLoop
+            }
+            IfCondition EqualTo(key, TUI_Keys.KEY_RIGHT) ThenBlock: {
+                IfCondition LessThan(UILayout.cursor_col, len) ThenBlock: {
+                    UILayout.cursor_col = Add(UILayout.cursor_col, 1)
+                    UI_RenderInput(len)
+                    TUI_Refresh()
+                }
+                ContinueLoop
+            }
+            IfCondition EqualTo(key, TUI_Keys.KEY_HOME) ThenBlock: {
+                UILayout.cursor_col = 0
+                UI_RenderInput(len)
+                TUI_Refresh()
+                ContinueLoop
+            }
+            IfCondition EqualTo(key, TUI_Keys.KEY_END) ThenBlock: {
+                UILayout.cursor_col = len
+                UI_RenderInput(len)
+                TUI_Refresh()
+                ContinueLoop
+            }
+
             // Enter
             IfCondition Or(EqualTo(key, 10), EqualTo(key, 13)) ThenBlock: {
                 IfCondition EqualTo(UILayout.in_paste, 0) ThenBlock: {
                     BreakLoop
                 } ElseBlock: {
                     IfCondition LessThan(len, Subtract(UILayout.input_cap, 1)) ThenBlock: {
-                        SetByte(UILayout.input_buf, len, 10)
+                        // In paste mode: insert newline at cursor_col.
+                        _pi = len
+                        WhileLoop GreaterThan(_pi, UILayout.cursor_col) {
+                            SetByte(UILayout.input_buf, _pi, GetByte(UILayout.input_buf, Subtract(_pi, 1)))
+                            _pi = Subtract(_pi, 1)
+                        }
+                        SetByte(UILayout.input_buf, UILayout.cursor_col, 10)
+                        UILayout.cursor_col = Add(UILayout.cursor_col, 1)
                         len = Add(len, 1)
                         SetByte(UILayout.input_buf, len, 0)
                         UILayout.input_len = len
@@ -1516,9 +1608,16 @@ Function.UI.ReadLine {
                 }
             } ElseBlock: {
                 IfCondition Or(EqualTo(key, TUI_Keys.KEY_BACKSPACE), EqualTo(key, 8)) ThenBlock: {
-                    IfCondition GreaterThan(len, 0) ThenBlock: {
+                    IfCondition GreaterThan(UILayout.cursor_col, 0) ThenBlock: {
+                        // Shift bytes [cursor_col..len-1] left by one to delete char before cursor.
+                        _bs_i = Subtract(UILayout.cursor_col, 1)
+                        WhileLoop LessThan(_bs_i, Subtract(len, 1)) {
+                            SetByte(UILayout.input_buf, _bs_i, GetByte(UILayout.input_buf, Add(_bs_i, 1)))
+                            _bs_i = Add(_bs_i, 1)
+                        }
                         len = Subtract(len, 1)
                         SetByte(UILayout.input_buf, len, 0)
+                        UILayout.cursor_col = Subtract(UILayout.cursor_col, 1)
                         UILayout.input_len = len
                         req_l = UI_CalcInputLines(len)
                         changed = UI_AdjustPromptHeight(req_l)
@@ -1532,7 +1631,14 @@ Function.UI.ReadLine {
                         k_sp = 0
                         WhileLoop LessThan(k_sp, 4) {
                             IfCondition LessThan(len, Subtract(UILayout.input_cap, 1)) ThenBlock: {
-                                SetByte(UILayout.input_buf, len, 32)
+                                // Shift [cursor_col..len-1] right one to make room.
+                                _ti = len
+                                WhileLoop GreaterThan(_ti, UILayout.cursor_col) {
+                                    SetByte(UILayout.input_buf, _ti, GetByte(UILayout.input_buf, Subtract(_ti, 1)))
+                                    _ti = Subtract(_ti, 1)
+                                }
+                                SetByte(UILayout.input_buf, UILayout.cursor_col, 32)
+                                UILayout.cursor_col = Add(UILayout.cursor_col, 1)
                                 len = Add(len, 1)
                             }
                             k_sp = Add(k_sp, 1)
@@ -1549,7 +1655,14 @@ Function.UI.ReadLine {
                     } ElseBlock: {
                         IfCondition And(GreaterEqual(key, 32), LessThan(key, 127)) ThenBlock: {
                             IfCondition LessThan(len, Subtract(UILayout.input_cap, 1)) ThenBlock: {
-                                SetByte(UILayout.input_buf, len, key)
+                                // Shift [cursor_col..len-1] right one to make room.
+                                _ci = len
+                                WhileLoop GreaterThan(_ci, UILayout.cursor_col) {
+                                    SetByte(UILayout.input_buf, _ci, GetByte(UILayout.input_buf, Subtract(_ci, 1)))
+                                    _ci = Subtract(_ci, 1)
+                                }
+                                SetByte(UILayout.input_buf, UILayout.cursor_col, key)
+                                UILayout.cursor_col = Add(UILayout.cursor_col, 1)
                                 len = Add(len, 1)
                                 SetByte(UILayout.input_buf, len, 0)
                                 UILayout.input_len = len
@@ -1571,6 +1684,7 @@ Function.UI.ReadLine {
         // Count visual lines BEFORE clearing input_len so soft-wrap rows are known
         _submit_lines = UI_CalcInputLines(UILayout.input_len)
         UILayout.input_len = 0
+        UILayout.cursor_col = 0
         UI_AdjustPromptHeight(1)
         TUI_HideCursor()
         UI_DrawTurnSeparator()

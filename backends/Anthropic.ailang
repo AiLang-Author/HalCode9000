@@ -167,11 +167,11 @@ Function.Anthropic.BuildHeaders {
         c = StringConcat(b, AnthConst.ANTH_VERSION)
         d = StringConcat(c, "\ncontent-type: application/json")
         e = StringConcat(d, "\naccept: text/event-stream")
-        // oauth beta combines oauth + caching + extended-cache-ttl (for 1h TTL support)
+        // extended-cache-ttl graduated to GA — beta header no longer accepted; ttl field in body still works
         IfCondition EqualTo(is_oauth, 1) ThenBlock: {
-            f = StringConcat(e, "\nanthropic-beta: oauth-2025-04-20,prompt-caching-2024-07-31,extended-cache-ttl-2025-02-19\n")
+            f = StringConcat(e, "\nanthropic-beta: oauth-2025-04-20,prompt-caching-2024-07-31\n")
         } ElseBlock: {
-            f = StringConcat(e, "\nanthropic-beta: prompt-caching-2024-07-31,extended-cache-ttl-2025-02-19\n")
+            f = StringConcat(e, "\nanthropic-beta: prompt-caching-2024-07-31\n")
         }
         ReturnValue(f)
     }
