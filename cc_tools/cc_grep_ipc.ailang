@@ -1142,14 +1142,16 @@ Function.CCGrep_HandleRequest {
             IfCondition NotEqual(wl_str, 0) ThenBlock: {
                 IfCondition EqualTo(StringToInt(wl_str), 1) ThenBlock: { GrepConfig.whole_line = 1 }
             }
-            rec_str = UtilArgs_GetString(validated, "recursive")
-            IfCondition NotEqual(rec_str, 0) ThenBlock: {
-                IfCondition EqualTo(StringToInt(rec_str), 1) ThenBlock: { GrepConfig.recursive = 1 }
-            }
-            // Fallback: model may send recursive as a JSON integer/bool rather than a string.
-            // UtilArgs_GetString returns null for non-string JSON values and falls back to default "0".
+            // UtilArgs_GetInt reads the JSON number directly — works for integer 1 from the model.
+            // JSON.GetBool only matches JSON booleans (true/false), not integers, so it was
+            // always returning 0 for "recursive": 1, causing the "is a directory" false error.
+            IfCondition GreaterThan(UtilArgs_GetInt(validated, "recursive"), 0) ThenBlock: { GrepConfig.recursive = 1 }
+            // Fallback: model may send as string "1" (UtilArgs_GetString is a no-op for int fields)
             IfCondition EqualTo(GrepConfig.recursive, 0) ThenBlock: {
-                IfCondition EqualTo(JSON.GetBool(args, "recursive"), 1) ThenBlock: { GrepConfig.recursive = 1 }
+                rec_str = UtilArgs_GetString(validated, "recursive")
+                IfCondition NotEqual(rec_str, 0) ThenBlock: {
+                    IfCondition EqualTo(StringToInt(rec_str), 1) ThenBlock: { GrepConfig.recursive = 1 }
+                }
             }
             inc_str = UtilArgs_GetString(validated, "include")
             IfCondition NotEqual(inc_str, 0) ThenBlock: { GrepConfig.include_pat = inc_str }
