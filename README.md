@@ -1,4 +1,4 @@
-# HalCode9000 ALPHA v2.0.1
+# HalCode9000 Beta v1
 
 ```
   ██╗  ██╗ █████╗ ██╗      ██████╗ ██████╗ ██████╗ ███████╗
@@ -106,12 +106,13 @@ Adding a new tool is as simple as writing one binary and registering it.
 
 ## MCP Server Mode
 
+HalCode9000 ships a dedicated MCP bridge binary (`cc_mcp_ipc.x`) that speaks the Model Context Protocol over stdio. Register it once and any MCP client — Claude Code, Cursor, Windsurf — gets access to DeepSeek, sandboxed Bash, and the Relmem symbol graph.
+
 ```bash
-# Register once per project
-claude mcp add halcode9000 -- /path/to/HalCode9000.x --mcp
+claude mcp add -s user halcode9000 -- /path/to/cc_mcp_ipc.x
 ```
 
-Gives Claude Code (or any MCP client) access to all your local tools and memory.
+The bridge routes each tool call through HalCode9000's IPC workers without blocking the main session — poll-based multiplexing means Claude Code and HalCode9000 share the same workers concurrently.
 
 ---
 
@@ -124,6 +125,27 @@ Gives Claude Code (or any MCP client) access to all your local tools and memory.
 | **Total** | **~2.2 MB** |
 
 Statically linked. Runs fast even on modest hardware.
+
+---
+
+## What's New — Beta v1
+
+HalCode9000 is a native terminal chat client for running LLM agents with a full tool suite — Bash, file I/O, grep, git, web fetch, and more — all dispatched over a lightweight IPC layer written in AILang. No Node, no Electron, no Python runtime. Just a ~500KB binary.
+
+Supports Anthropic, OpenAI, DeepSeek, Gemini, Grok/xAI, OpenRouter, and local Ollama. Add your own provider with a JSON config file.
+
+**Beta v1 changelog:**
+- **MCP bridge** — `cc_mcp_ipc.x` is a proper stdio MCP server. Register once with `claude mcp add` and Claude Code (or any MCP client) can call DeepSeek, sandboxed Bash, and Relmem directly
+- **Poll-based IPC multiplexing** — tool workers now serve HalCode9000 and external MCP clients concurrently; no blocking, no connection queuing
+- **Skills system** — persistent, version-controlled skill sheets teach the agent reusable patterns, project conventions, and domain knowledge across sessions
+- **Cursor movement in input** — left/right/home/end keys, insert-at-position, backspace-at-position
+- **OpenRouter support** — any model on the OpenRouter catalogue, model sub-menu at startup
+- **Session logging** — full conversations including tool calls and reasoning saved to `~/.halcode/logs/`
+- **Persistent context via Pgmem** — agents remember working state across sessions
+- **Stream stability** — reduced retry waste, turn log preserves completed tool work on drops, 40KB write guard prevents oversized calls
+- **UI overhaul** — scroll buffer, split-pane chrome, live token counters, HAL mascot, reasoning display
+
+Bug reports very welcome — open an issue or it didn't happen.
 
 ---
 
