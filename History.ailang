@@ -42,7 +42,6 @@ FixedPool.HistState {
 // =============================================================================
 Function.History.Init {
     Body: {
-        IfCondition EqualTo(HistState.initialized, 1) ThenBlock: { ReturnValue(0) }
         HistState.messages = JSON.NewArray()
         HistState.count = 0
         HistState.initialized = 1

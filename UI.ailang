@@ -1507,53 +1507,36 @@ Function.UI.ReadLine {
 
             key = TUI_GetKey()
             IfCondition EqualTo(key, TUI_Keys.KEY_NONE) ThenBlock: { ContinueLoop }
-            
-            // Handle Bracketed Paste "\x1b[200~" start and "\x1b[201~" end
-            IfCondition EqualTo(key, 27) ThenBlock: {
-                _pfd = Allocate(8)
-                StoreValue(_pfd, 0, "dword")
-                StoreValue(Add(_pfd, 4), 1, "dword")
-                _pr = SystemCall(UISys.SYS_POLL, _pfd, 1, 0, 0, 0)
-                Deallocate(_pfd, 8)
-                IfCondition GreaterThan(_pr, 0) ThenBlock: {
-                    k2 = TUI_GetKey()
-                    IfCondition EqualTo(k2, 91) ThenBlock: {
-                        k3 = TUI_GetKey()
-                        // Page Up: ESC [ 5 ~
-                        IfCondition EqualTo(k3, 53) ThenBlock: {
-                            _tilde = TUI_GetKey()
-                            page = Subtract(Subtract(UILayout.chat_bot, UILayout.chat_top), 2)
-                            UI_ScrollBack(page)
-                            TUI_Refresh()
-                            ContinueLoop
-                        }
-                        // Page Down: ESC [ 6 ~
-                        IfCondition EqualTo(k3, 54) ThenBlock: {
-                            _tilde = TUI_GetKey()
-                            page = Subtract(Subtract(UILayout.chat_bot, UILayout.chat_top), 2)
-                            UI_ScrollForward(page)
-                            TUI_Refresh()
-                            ContinueLoop
-                        }
-                        IfCondition EqualTo(k3, 50) ThenBlock: {
-                            k4 = TUI_GetKey()
-                            IfCondition EqualTo(k4, 48) ThenBlock: {
-                                k5 = TUI_GetKey()
-                                k6 = TUI_GetKey()
-                                IfCondition EqualTo(k5, 48) ThenBlock: { UILayout.in_paste = 1 }
-                                IfCondition EqualTo(k5, 49) ThenBlock: {
-                                    UILayout.in_paste = 0
-                                    req_l = UI_CalcInputLines(len)
-                                    changed = UI_AdjustPromptHeight(req_l)
-                                    IfCondition EqualTo(changed, 0) ThenBlock: { UI_PaintBodyRow() }
-                                    UI_RenderInput(len)
-                                    TUI_Refresh()
-                                }
-                                ContinueLoop
-                            }
-                        }
-                    }
-                }
+
+            // Bracketed paste: TUI_GetKey now decodes ESC[200~ / ESC[201~ as proper keys
+            IfCondition EqualTo(key, TUI_Keys.KEY_PASTE_START) ThenBlock: {
+                UILayout.in_paste = 1
+                ContinueLoop
+            }
+            IfCondition EqualTo(key, TUI_Keys.KEY_PASTE_END) ThenBlock: {
+                UILayout.in_paste = 0
+                req_l = UI_CalcInputLines(len)
+                changed = UI_AdjustPromptHeight(req_l)
+                IfCondition EqualTo(changed, 0) ThenBlock: { UI_PaintBodyRow() }
+                UI_RenderInput(len)
+                TUI_Refresh()
+                ContinueLoop
+            }
+
+            // ESC: bare ESC key — ignore silently during readline
+            IfCondition EqualTo(key, TUI_Keys.KEY_ESC) ThenBlock: { ContinueLoop }
+
+            // Page Up / Page Down (TUI_GetKey decodes ESC[5~ / ESC[6~ as KEY_PGUP/KEY_PGDN)
+            IfCondition EqualTo(key, TUI_Keys.KEY_PGUP) ThenBlock: {
+                page = Subtract(Subtract(UILayout.chat_bot, UILayout.chat_top), 2)
+                UI_ScrollBack(page)
+                TUI_Refresh()
+                ContinueLoop
+            }
+            IfCondition EqualTo(key, TUI_Keys.KEY_PGDN) ThenBlock: {
+                page = Subtract(Subtract(UILayout.chat_bot, UILayout.chat_top), 2)
+                UI_ScrollForward(page)
+                TUI_Refresh()
                 ContinueLoop
             }
 
