@@ -939,12 +939,45 @@ SubRoutine.Main {
         client_fd = Socket.Accept(CCBashState.listen_fd)
         IfCondition GreaterEqual(client_fd, 0) ThenBlock: {
             done = 0
+            pfd  = Allocate(16)
             WhileLoop EqualTo(done, 0) {
-                req = Socket.RecvMsg(client_fd)
-                IfCondition EqualTo(req, 0) ThenBlock: { done = 1 }
-                IfCondition NotEqual(req, 0) ThenBlock: {
-                    IfCondition NotEqual(req, -1) ThenBlock: {
-                        CCBash_HandleRequest(client_fd, req)
+                StoreValue(pfd, client_fd, "dword")
+                SetByte(pfd, 4, 1)
+                SetByte(pfd, 5, 0)
+                SetByte(pfd, 6, 0)
+                SetByte(pfd, 7, 0)
+                StoreValue(Add(pfd, 8), CCBashState.listen_fd, "dword")
+                SetByte(pfd, 12, 1)
+                SetByte(pfd, 13, 0)
+                SetByte(pfd, 14, 0)
+                SetByte(pfd, 15, 0)
+
+                SystemCall(CCBashSys.SYS_POLL, pfd, 2, -1, 0, 0)
+
+                rev_client = GetByte(pfd, 6)
+                rev_listen = GetByte(pfd, 14)
+
+                IfCondition NotEqual(rev_listen, 0) ThenBlock: {
+                    new_fd = Socket.Accept(CCBashState.listen_fd)
+                    IfCondition GreaterEqual(new_fd, 0) ThenBlock: {
+                        Socket.SetRecvTimeout(new_fd, 10000)
+                        mcp_req = Socket.RecvMsg(new_fd)
+                        IfCondition NotEqual(mcp_req, 0) ThenBlock: {
+                            IfCondition NotEqual(mcp_req, -1) ThenBlock: {
+                                CCBash_HandleRequest(new_fd, mcp_req)
+                            }
+                        }
+                        Socket.Close(new_fd)
+                    }
+                }
+
+                IfCondition NotEqual(rev_client, 0) ThenBlock: {
+                    req = Socket.RecvMsg(client_fd)
+                    IfCondition EqualTo(req, 0) ThenBlock: { done = 1 }
+                    IfCondition NotEqual(req, 0) ThenBlock: {
+                        IfCondition NotEqual(req, -1) ThenBlock: {
+                            CCBash_HandleRequest(client_fd, req)
+                        }
                     }
                 }
             }

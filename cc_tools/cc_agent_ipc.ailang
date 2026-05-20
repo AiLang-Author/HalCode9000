@@ -19,6 +19,7 @@ FixedPool.AgentSys {
     "SYS_WRITE":     Initialize=1
     "SYS_OPEN":      Initialize=2
     "SYS_CLOSE":     Initialize=3
+    "SYS_POLL":      Initialize=7
     "SYS_FORK":      Initialize=57
     "SYS_EXECVE":    Initialize=59
     "SYS_EXIT":      Initialize=60
@@ -364,12 +365,51 @@ SubRoutine.Main {
         client_fd = Socket.Accept(AgentState.listen_fd)
         IfCondition GreaterEqual(client_fd, 0) ThenBlock: {
             done = 0
+            // 2-entry pollfd array: [client_fd, listen_fd]
+            // struct pollfd { int fd; short events; short revents; } = 8 bytes each
+            pfd = Allocate(16)
             WhileLoop EqualTo(done, 0) {
-                req = Socket.RecvMsg(client_fd)
-                IfCondition EqualTo(req, 0) ThenBlock: { done = 1 }
-                IfCondition NotEqual(req, 0) ThenBlock: {
-                    IfCondition NotEqual(req, -1) ThenBlock: {
-                        Agent_HandleRequest(client_fd, req)
+                // Fill pollfd[0] for persistent client (HC or first connector)
+                StoreValue(pfd, client_fd, "dword")
+                SetByte(pfd, 4, 1)   // events = POLLIN
+                SetByte(pfd, 5, 0)
+                SetByte(pfd, 6, 0)   // revents cleared
+                SetByte(pfd, 7, 0)
+                // Fill pollfd[1] for listen socket (new MCP connections)
+                StoreValue(Add(pfd, 8), AgentState.listen_fd, "dword")
+                SetByte(pfd, 12, 1)  // events = POLLIN
+                SetByte(pfd, 13, 0)
+                SetByte(pfd, 14, 0)  // revents cleared
+                SetByte(pfd, 15, 0)
+
+                SystemCall(AgentSys.SYS_POLL, pfd, 2, -1, 0, 0)
+
+                rev_client = GetByte(pfd, 6)
+                rev_listen = GetByte(pfd, 14)
+
+                // New connection from MCP client: accept, serve once, close
+                IfCondition NotEqual(rev_listen, 0) ThenBlock: {
+                    new_fd = Socket.Accept(AgentState.listen_fd)
+                    IfCondition GreaterEqual(new_fd, 0) ThenBlock: {
+                        Socket.SetRecvTimeout(new_fd, 10000)
+                        mcp_req = Socket.RecvMsg(new_fd)
+                        IfCondition NotEqual(mcp_req, 0) ThenBlock: {
+                            IfCondition NotEqual(mcp_req, -1) ThenBlock: {
+                                Agent_HandleRequest(new_fd, mcp_req)
+                            }
+                        }
+                        Socket.Close(new_fd)
+                    }
+                }
+
+                // Persistent client (HC) has data
+                IfCondition NotEqual(rev_client, 0) ThenBlock: {
+                    req = Socket.RecvMsg(client_fd)
+                    IfCondition EqualTo(req, 0) ThenBlock: { done = 1 }
+                    IfCondition NotEqual(req, 0) ThenBlock: {
+                        IfCondition NotEqual(req, -1) ThenBlock: {
+                            Agent_HandleRequest(client_fd, req)
+                        }
                     }
                 }
             }
