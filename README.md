@@ -11,7 +11,7 @@
 
 **The tiniest, most powerful self-hosted agentic coding system.**
 
-370 KB main binary. ~2.2 MB total with all 16 workers.  
+~490 KB main binary. ~3.8 MB total with all 23 workers.  
 Full-screen terminal agent with persistent memory, parallel tool workers, sub-agents, and **Skills** — reusable, version-controlled agent intelligence.
 
 ---
@@ -19,7 +19,7 @@ Full-screen terminal agent with persistent memory, parallel tool workers, sub-ag
 ## ✨ What Makes It Special
 
 - **Skills System** — Give the agent persistent, composable skills: tool-use patterns, coding standards, architecture rules, domain knowledge, debugging strategies, and more. The model can read, combine, and improve them over time.
-- **16 persistent tool workers** over abstract Unix sockets — fast, reliable, and easy to extend.
+- **23 persistent tool workers** over abstract Unix sockets — fast, reliable, and easy to extend.
 - **True long-term memory** via PostgreSQL (`pgmem`) + code-aware repository indexing (`relmem`).
 - **Sub-agents** — spawn parallel agents with their own tools and context.
 - **Multi-provider** — Anthropic, OpenAI, Grok, Gemini, DeepSeek, Groq, Ollama, and any OpenAI-compatible backend.
@@ -55,7 +55,7 @@ source ~/.halcode/keys.env
 | **Multi-Provider** | Switch between providers at startup. Add new ones with a single JSON file |
 | **Persistent Memory** | `pgmem` stores sessions, decisions, todos, and context across restarts |
 | **Code-Aware Memory** | `relmem` lets the model search symbols and definitions across your entire codebase |
-| **Parallel Tools** | 16 standalone workers (Read, Edit, Bash, Git, Grep, WebFetch, etc.) dispatched in parallel |
+| **Parallel Tools** | 23 standalone workers (Read, Edit, Bash, Git, Grep, WebFetch, etc.) dispatched in parallel |
 | **Sub-Agents** | Model can spawn child agents for complex tasks |
 | **MCP Mode** | Run as `--mcp` for seamless integration with Claude Code |
 | **TUI** | Full-screen terminal interface with live token counters and status |
@@ -76,7 +76,7 @@ Skills turn HalCode9000 into a programmable AI development environment. You — 
 
 Skills are loaded dynamically, stored alongside your code, and survive across sessions. The agent can discover, combine, and evolve them over time. This is what makes long-running, deeply contextual work actually practical.
 
-> Example skill files and templates will be added to `/skills/` soon.
+> 24 curated skill sheets ship in `/skills/` covering AILang, tools, and general development domains.
 
 ---
 
@@ -98,7 +98,7 @@ Configured via `providers/*.json` — no code changes needed.
 
 All tools are independent binaries communicating over abstract Unix sockets (`@halcode/*`):
 
-`Read` · `Head` · `LS` · `Write` · `Edit` · `Bash` · `Find` · `Grep` · `Git` · `WebFetch` · `JS` · `MCP Client` · `Agent` · `Pgmem` · `Relmem`
+`Read` · `Head` · `LS` · `Write` · `Edit` · `Bash` · `Find` · `Grep` · `Git` · `WebFetch` · `Agent` · `Pgmem` · `Relmem` · `MCP` · `Skills` · `Stat` · `Wc` · `Du` · `Diff` · `Olympus` · `Sleep` · `Ailang` · `AilangLSP`
 
 Adding a new tool is as simple as writing one binary and registering it.
 
@@ -120,9 +120,9 @@ The bridge routes each tool call through HalCode9000's IPC workers without block
 
 | Component | Size |
 |---|---|
-| Main binary | ~370 KB |
-| All 16 tool workers | ~1.8 MB |
-| **Total** | **~2.2 MB** |
+| Main binary | ~490 KB |
+| All 23 tool workers | ~3.3 MB |
+| **Total** | **~3.8 MB** |
 
 Statically linked. Runs fast even on modest hardware.
 
@@ -130,22 +130,24 @@ Statically linked. Runs fast even on modest hardware.
 
 ## What's New — Beta v1
 
-HalCode9000 is a native terminal chat client for running LLM agents with a full tool suite — Bash, file I/O, grep, git, web fetch, and more — all dispatched over a lightweight IPC layer written in AILang. No Node, no Electron, no Python runtime. Just a ~500KB binary.
+HalCode9000 is a native terminal chat client that drives LLM agents backed by a full tool suite: Bash, file I/O, grep, git, web fetch, and more — all dispatched through a lightweight IPC layer written in AILang. No Node, no Electron, no Python runtime. One ~490KB main binary, twenty-three standalone tool workers, zero runtime dependencies.
 
-Supports Anthropic, OpenAI, DeepSeek, Gemini, Grok/xAI, OpenRouter, and local Ollama. Add your own provider with a JSON config file.
+Supports Anthropic, OpenAI, DeepSeek, Gemini, Grok/xAI, OpenRouter, and local Ollama. Drop in a JSON config file to add your own provider.
 
-**Beta v1 changelog:**
-- **MCP bridge** — `cc_mcp_ipc.x` is a proper stdio MCP server. Register once with `claude mcp add` and Claude Code (or any MCP client) can call DeepSeek, sandboxed Bash, and Relmem directly
-- **Poll-based IPC multiplexing** — tool workers now serve HalCode9000 and external MCP clients concurrently; no blocking, no connection queuing
-- **Skills system** — persistent, version-controlled skill sheets teach the agent reusable patterns, project conventions, and domain knowledge across sessions
-- **Cursor movement in input** — left/right/home/end keys, insert-at-position, backspace-at-position
-- **OpenRouter support** — any model on the OpenRouter catalogue, model sub-menu at startup
-- **Session logging** — full conversations including tool calls and reasoning saved to `~/.halcode/logs/`
-- **Persistent context via Pgmem** — agents remember working state across sessions
-- **Stream stability** — reduced retry waste, turn log preserves completed tool work on drops, 40KB write guard prevents oversized calls
-- **UI overhaul** — scroll buffer, split-pane chrome, live token counters, HAL mascot, reasoning display
+**Highlights:**
+- **MCP bridge** — `cc_mcp_ipc.x` speaks the Model Context Protocol over stdio. Register once with `claude mcp add` and any MCP client (Claude Code, Cursor, Windsurf) can call DeepSeek, sandboxed Bash, and the Relmem symbol graph directly.
+- **Poll-based IPC multiplexing** — tool workers serve HalCode9000 and external MCP clients concurrently with zero blocking and no connection queuing.
+- **Skills system** — 24 version-controlled skill sheets in `/skills/` teach the agent reusable patterns, project conventions, and domain knowledge that persist across sessions.
+- **Persistent context via Pgmem** — agents pick up working state right where the last session left off.
+- **Full input editing** — cursor movement, insert-at-position, backspace-at-position, home/end, plus scroll buffer.
 
-Bug reports very welcome — open an issue or it didn't happen.
+**Also shipping:**
+- OpenRouter support with model sub-menu at startup
+- Session logging to `~/.halcode/logs/` (full conversations, tool calls, reasoning)
+- Stream stability: reduced retry waste, turn log preserves completed tool work on drops, 40KB write guard
+- UI overhaul: scroll buffer, split-pane chrome, live token counters, reasoning display
+
+Open an issue for bugs, ideas, or a good sharp-edge story — every report makes the next release tighter.
 
 ---
 
