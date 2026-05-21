@@ -360,7 +360,7 @@ Function.Backend.LoadProviders {
         IfCondition LessThan(dfd, 0) ThenBlock: { ReturnValue(0) }
 
         dents    = Allocate(BELoaderConst.DENTS_BUF)
-        arr      = XArray.XCreate(16)
+        arr      = Array.Create(16)
         scanning = 1
 
         WhileLoop EqualTo(scanning, 1) {
@@ -399,7 +399,7 @@ Function.Backend.LoadProviders {
                                         SetByte(fbuf, nr, 0)
                                         obj = JSON.AsObject(ParseJSON(fbuf))
                                         IfCondition NotEqual(obj, 0) ThenBlock: {
-                                            XArray.XPush(arr, obj)
+                                            Array.Push(arr, obj)
                                         }
                                     }
                                 }

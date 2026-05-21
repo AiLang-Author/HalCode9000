@@ -1606,7 +1606,7 @@ Function.CC_PromptProvider {
         custom_arr = Backend.LoadProviders(conn_dir)
         custom_count = 0
         IfCondition NotEqual(custom_arr, 0) ThenBlock: {
-            custom_count = XArray.XSize(custom_arr)
+            custom_count = Array.Size(custom_arr)
         }
 
         prov = 0
@@ -1625,7 +1625,7 @@ Function.CC_PromptProvider {
                 CC_WriteStdout("\n  --- User Connections ---\n")
                 ci = 0
                 WhileLoop LessThan(ci, custom_count) {
-                    cobj = XArray.XGet(custom_arr, ci)
+                    cobj = Array.Get(custom_arr, ci)
                     cname  = JSON.GetString(cobj, "name")
                     cmodel = JSON.GetString(cobj, "default_model")
                     IfCondition EqualTo(cname, 0) ThenBlock: { cname = "?" }
@@ -1659,7 +1659,7 @@ Function.CC_PromptProvider {
                     custom_arr = Backend.LoadProviders(conn_dir2)
                     custom_count = 0
                     IfCondition NotEqual(custom_arr, 0) ThenBlock: {
-                        custom_count = XArray.XSize(custom_arr)
+                        custom_count = Array.Size(custom_arr)
                     }
                 }
                 ContinueLoop
@@ -1786,7 +1786,7 @@ Function.CC_PromptProvider {
                 max_custom = Add(custom_count, 7)
                 IfCondition And(GreaterEqual(choice, 7), LessThan(choice, max_custom)) ThenBlock: {
                     ci = Subtract(choice, 7)
-                    cobj = XArray.XGet(custom_arr, ci)
+                    cobj = Array.Get(custom_arr, ci)
                     cn   = JSON.GetString(cobj, "name")
                     cbk  = JSON.GetString(cobj, "backend")
                     curl = JSON.GetString(cobj, "base_url")

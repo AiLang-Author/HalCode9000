@@ -1,5 +1,29 @@
 # Project Memory
 
+## Session 2026-05-20 — cc_mcp_ipc dual-mode + README overhaul
+
+### What was built
+- **`cc_tools/cc_mcp_ipc.ailang` — dual-mode rewrite** — when invoked by CC_LaunchTool (argv[2] present), binds `@halcode/MCP` and serves HC's internal model as an IPC daemon. When invoked standalone (no args, via `claude mcp add`), runs as a stdio NDJSON MCP server routing tools to @halcode/Agent, Bash, Relmem, Pgmem. Fixes the startup hang where HC would block trying to connect to @halcode/MCP (which the old stdio-only version never bound).
+- **`cc_tools.json`** — restored `cc_mcp_ipc.x` entry (had been incorrectly removed as a "fix" for the hang). Entry is back and correct.
+- **argv detection pattern** — `CCMcp_GetArg(n)` reads `/proc/self/cmdline` (null-separated). Same pattern as `CCSkills_GetArg` in cc_skills_ipc. Use this anywhere a tool needs to branch on whether CC_LaunchTool launched it.
+- **README.md** — DeepSeek rewrote the marketing copy (Beta v1 framing, structured changelog, confident tone). Then corrected: 23 tools (not 16/17), ~490KB main binary (not 370KB), ~3.8MB total (not 2.2MB), 24 skill sheets (not 20), tools list updated to match cc_tools.json exactly.
+
+### Key facts (current)
+- **Tool count**: 23 registered in cc_tools.json
+- **Main binary**: ~490 KB (HalCode9000.x = 501,191 bytes)
+- **All 23 tool workers**: ~3.3 MB
+- **Total**: ~3.8 MB
+- **Skill sheets**: 24 in `/skills/` (ailang×14, general×3, halcode×4, tools×3)
+- **MCP registration**: `claude mcp add -s user halcode9000 -- /path/to/cc_mcp_ipc.x` (no --mcp flag — cc_mcp_ipc.x IS the MCP server)
+
+### Poll-based IPC multiplexing (load-bearing)
+cc_agent_ipc, cc_bash_ipc, and cc_relmem_ipc all use SYS_POLL=7 in their inner RecvMsg loops so they can serve HC's persistent connection AND single-shot connections from cc_mcp_ipc (stdio mode) concurrently. Do not remove this — it's what makes the MCP bridge work without blocking.
+
+### Next priorities
+- **cc_relmem_ipc recompile** — blocked on Library.Hash InlineAsm migration (compiler dev session ongoing). Binary in repo is pre-migration.
+- **Soul/identity system** — SOUL.md + pgmem-backed framework rows. Design settled, not built.
+- **Skill quality pass** — tighten trigger conditions, output format, stop conditions on existing sheets.
+
 ## Session 2026-05-29 — Skills system + MCP registration
 
 ### What was built
