@@ -22,6 +22,7 @@
     {"binary": "./cc_mcp_ipc.x",      "name": "MCP",      "socket": "@halcode/MCP"},
     {"binary": "./cc_skills_ipc.x",   "name": "Skills",   "socket": "@halcode/Skills"},
     {"binary": "./cc_ailang_ipc.x",      "name": "Ailang",    "socket": "@halcode/Ailang"},
-    {"binary": "./cc_ailang_lsp_ipc.x",  "name": "AilangLSP", "socket": "@halcode/AilangLSP"}
+    {"binary": "./cc_ailang_lsp_ipc.x",  "name": "AilangLSP", "socket": "@halcode/AilangLSP"},
+    {"binary": "./cc_packager_ipc.x",   "name": "Packager",  "socket": "@halcode/Packager"}
   ]
 }

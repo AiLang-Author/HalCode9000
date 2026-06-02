@@ -63,7 +63,7 @@ FixedPool.CCConst {
     "INPUT_BUF_SZ":   Initialize=1048576      // 1MB
     "LINE_BUF_SZ":    Initialize=1048576      // 1MB - prevents Buffer Bound overflows
     "SSE_STATE_SZ":   Initialize=88
-    "MAX_CHILDREN":   Initialize=16
+    "MAX_CHILDREN":   Initialize=32
     "BIND_WAIT_NS":   Initialize=5000000000   // 5s — allows slower tools like relmem to bind
     "PARK_THRESHOLD": Initialize=32768        // 32KB — fixes PGMEM SPILL PANIC
     "LOG_DIR":        Initialize=0, CanChange=True
@@ -83,6 +83,14 @@ FixedPool.CCRunState {
     "log_fd":        Initialize=0, CanChange=True  // 0 = not open
     "log_open":      Initialize=0, CanChange=True  // 1 when log_fd is valid
     "log_bytes":     Initialize=0, CanChange=True  // bytes written this session
+}
+
+// MCP on-demand tool table — stores manifest entries for spawn-per-call dispatch.
+// Each slot: 8 name + 8 binary + 8 socket = 24 bytes, up to 32 tools.
+FixedPool.MCPToolTable {
+    "entries":   Initialize=0, CanChange=True  // heap block: 32 * 24 = 768 bytes
+    "count":     Initialize=0, CanChange=True
+    "schemas":   Initialize=0, CanChange=True  // JSON array of tool schemas
 }
 
 FixedPool.QuoteState {
@@ -790,10 +798,13 @@ Function.CC_LaunchTool {
     }
 }
 
-// SIGTERM every child we spawned. Best-effort; if a service is already
-// gone, kill returns -ESRCH and we ignore it.
+// Gracefully shut down every child: SIGTERM → wait → SIGKILL stragglers → reap.
+// Prevents zombie processes by always calling waitpid on every child we forked.
 Function.CC_KillAllChildren {
     Body: {
+        IfCondition EqualTo(CCRunState.child_count, 0) ThenBlock: { ReturnValue(0) }
+
+        // Phase 1: SIGTERM all children.
         i = 0
         WhileLoop LessThan(i, CCRunState.child_count) {
             slot = Multiply(i, 8)
@@ -803,6 +814,51 @@ Function.CC_KillAllChildren {
             }
             i = Add(i, 1)
         }
+
+        // Phase 2: Give children 500ms to exit gracefully.
+        ts = Allocate(16)
+        StoreValue(Add(ts, 0), 0)
+        StoreValue(Add(ts, 8), 500000000)
+        SystemCall(CCSys.SYS_NANOSLEEP, ts, 0, 0, 0, 0)
+        Deallocate(ts, 16)
+
+        // Phase 3: WNOHANG reap pass — collect anyone already exited.
+        // For survivors, escalate to SIGKILL.
+        status_buf = Allocate(8)
+        i = 0
+        WhileLoop LessThan(i, CCRunState.child_count) {
+            slot = Multiply(i, 8)
+            pid = Dereference(Add(CCRunState.child_pids, slot))
+            IfCondition GreaterThan(pid, 0) ThenBlock: {
+                StoreValue(status_buf, 0)
+                wr = SystemCall(CCSys.SYS_WAIT4, pid, status_buf, 1, 0, 0)
+                // 1 = WNOHANG
+                IfCondition EqualTo(wr, 0) ThenBlock: {
+                    // Child still alive — escalate to SIGKILL
+                    SystemCall(CCSys.SYS_KILL, pid, CCSys.SIGKILL, 0, 0, 0)
+                }
+                IfCondition GreaterThan(wr, 0) ThenBlock: {
+                    // Already reaped — mark slot empty
+                    StoreValue(Add(CCRunState.child_pids, slot), 0)
+                }
+            }
+            i = Add(i, 1)
+        }
+
+        // Phase 4: Blocking reap for any SIGKILL'd children.
+        i = 0
+        WhileLoop LessThan(i, CCRunState.child_count) {
+            slot = Multiply(i, 8)
+            pid = Dereference(Add(CCRunState.child_pids, slot))
+            IfCondition GreaterThan(pid, 0) ThenBlock: {
+                StoreValue(status_buf, 0)
+                SystemCall(CCSys.SYS_WAIT4, pid, status_buf, 0, 0, 0)
+                StoreValue(Add(CCRunState.child_pids, slot), 0)
+            }
+            i = Add(i, 1)
+        }
+        Deallocate(status_buf, 8)
+        CCRunState.child_count = 0
     }
 }
 
@@ -2991,6 +3047,221 @@ Function.CC_MCP_HandleToolsList {
     }
 }
 
+// MCP on-demand boot: parse manifest, launch each worker just long enough to
+// fetch its schema, then kill it immediately. No persistent workers.
+Function.CC_MCP_BootSchemas {
+    Body: {
+        CCRunState.child_pids = Allocate(Multiply(CCConst.MAX_CHILDREN, 8))
+        CCRunState.child_count = 0
+        MCPToolTable.entries = Allocate(768)   // 32 slots × 24 bytes
+        MemorySet(MCPToolTable.entries, 0, 768)
+        MCPToolTable.count = 0
+
+        fd = SystemCall(CCSys.SYS_OPEN, "./cc_tools.json", 0, 0, 0, 0)
+        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
+        mbuf = Allocate(32768)
+        n = SystemCall(CCSys.SYS_READ, fd, mbuf, 32767, 0, 0)
+        SystemCall(CCSys.SYS_CLOSE, fd, 0, 0, 0, 0)
+        IfCondition LessEqual(n, 0) ThenBlock: { Deallocate(mbuf, 32768) ReturnValue(0) }
+        SetByte(mbuf, n, 0)
+        parsed = ParseJSON(mbuf)
+        IfCondition EqualTo(parsed, 0) ThenBlock: { ReturnValue(0) }
+        obj = JSON.AsObject(parsed)
+        IfCondition EqualTo(obj, 0) ThenBlock: { ReturnValue(0) }
+        tools_arr = JSON.GetArray(obj, "tools")
+        IfCondition EqualTo(tools_arr, 0) ThenBlock: { ReturnValue(0) }
+        tcount = JSON.ArrayLength(tools_arr)
+
+        // For each tool: store manifest entry, launch, register schema, kill.
+        j = 0
+        WhileLoop LessThan(j, tcount) {
+            et = JSON.ArrayGet(tools_arr, j)
+            eo = JSON.AsObject(et)
+            IfCondition NotEqual(eo, 0) ThenBlock: {
+                bin  = JSON.GetString(eo, "binary")
+                tnam = JSON.GetString(eo, "name")
+                tsoc = JSON.GetString(eo, "socket")
+                IfCondition And(NotEqual(bin, 0), And(NotEqual(tnam, 0), NotEqual(tsoc, 0))) ThenBlock: {
+                    // Store in manifest lookup table
+                    IfCondition LessThan(MCPToolTable.count, 32) ThenBlock: {
+                        slot = Multiply(MCPToolTable.count, 24)
+                        StoreValue(Add(MCPToolTable.entries, slot),       tnam)
+                        StoreValue(Add(MCPToolTable.entries, Add(slot, 8)),  bin)
+                        StoreValue(Add(MCPToolTable.entries, Add(slot, 16)), tsoc)
+                        MCPToolTable.count = Add(MCPToolTable.count, 1)
+                    }
+                    // Launch worker, register schema, kill worker
+                    pid = CC_LaunchTool(bin, tnam, tsoc)
+                    IfCondition GreaterThan(pid, 0) ThenBlock: {
+                        IPCDispatch.RegisterTool(tnam, tsoc)
+                        // Kill this worker — we only needed its schema
+                        SystemCall(CCSys.SYS_KILL, pid, CCSys.SIGTERM, 0, 0, 0)
+                        _ws = Allocate(8)
+                        StoreValue(_ws, 0)
+                        SystemCall(CCSys.SYS_WAIT4, pid, _ws, 0, 0, 0)
+                        Deallocate(_ws, 8)
+                    }
+                }
+            }
+            j = Add(j, 1)
+        }
+        // All workers killed, schemas cached in IPCDState. Clear child tracking.
+        CCRunState.child_count = 0
+    }
+}
+
+// Look up a tool's binary and socket path by name from the manifest table.
+// Returns binary path via output, stores socket path at out_sock_ptr.
+Function.CC_MCP_FindTool {
+    Input: name: Address
+    Input: out_sock_ptr: Address
+    Output: Address
+    Body: {
+        i = 0
+        WhileLoop LessThan(i, MCPToolTable.count) {
+            slot = Multiply(i, 24)
+            tnam = Dereference(Add(MCPToolTable.entries, slot))
+            IfCondition EqualTo(StringCompare(tnam, name), 0) ThenBlock: {
+                bin  = Dereference(Add(MCPToolTable.entries, Add(slot, 8)))
+                tsoc = Dereference(Add(MCPToolTable.entries, Add(slot, 16)))
+                StoreValue(out_sock_ptr, tsoc)
+                ReturnValue(bin)
+            }
+            i = Add(i, 1)
+        }
+        StoreValue(out_sock_ptr, 0)
+        ReturnValue(0)
+    }
+}
+
+// Spawn a worker on demand, dispatch one tool call, kill the worker.
+// Returns the content string from the tool response.
+Function.CC_MCP_DispatchOnDemand {
+    Input: tname: Address
+    Input: targs: Address
+    Input: tool_use_id: Address
+    Input: out_is_error_ptr: Address
+    Output: Address
+    Body: {
+        StoreValue(out_is_error_ptr, 0, "dword")
+        sock_ptr = Allocate(8)
+        bin = CC_MCP_FindTool(tname, sock_ptr)
+        tsoc = Dereference(sock_ptr)
+        Deallocate(sock_ptr, 8)
+        IfCondition EqualTo(bin, 0) ThenBlock: {
+            StoreValue(out_is_error_ptr, 1, "dword")
+            ReturnValue(StringConcat("tool not found: ", tname))
+        }
+
+        // Launch worker
+        pid = CC_LaunchTool(bin, tname, tsoc)
+        IfCondition LessEqual(pid, 0) ThenBlock: {
+            StoreValue(out_is_error_ptr, 1, "dword")
+            ReturnValue(StringConcat("failed to launch: ", tname))
+        }
+
+        // Connect to worker socket (retry loop — worker needs time to bind)
+        cfd = Socket.Create(1, 1)
+        attempts = 0
+        cr = -1
+        WhileLoop LessThan(attempts, 100) {
+            cr = Socket.ConnectUnix(cfd, tsoc)
+            IfCondition GreaterEqual(cr, 0) ThenBlock: { BreakLoop }
+            Socket.Close(cfd)
+            cfd = Socket.Create(1, 1)
+            _ts = Allocate(16)
+            StoreValue(Add(_ts, 0), 0)
+            StoreValue(Add(_ts, 8), 100000000)
+            SystemCall(CCSys.SYS_NANOSLEEP, _ts, 0, 0, 0, 0)
+            Deallocate(_ts, 16)
+            attempts = Add(attempts, 1)
+        }
+        IfCondition LessThan(cr, 0) ThenBlock: {
+            SystemCall(CCSys.SYS_KILL, pid, CCSys.SIGKILL, 0, 0, 0)
+            _ws = Allocate(8) StoreValue(_ws, 0)
+            SystemCall(CCSys.SYS_WAIT4, pid, _ws, 0, 0, 0) Deallocate(_ws, 8)
+            StoreValue(out_is_error_ptr, 1, "dword")
+            ReturnValue(StringConcat("connect failed: ", tname))
+        }
+
+        // Build and send request
+        req = JSON.NewObject()
+        JSON.SetString(req, "method", "call")
+        IfCondition NotEqual(tool_use_id, 0) ThenBlock: {
+            JSON.SetString(req, "id", tool_use_id)
+        }
+        IfCondition NotEqual(targs, 0) ThenBlock: {
+            JSON.SetObject(req, "args", targs)
+        }
+        req_str = JSON.SerializeObject(req)
+        sr = Socket.SendMsg(cfd, req_str)
+        IfCondition LessThan(sr, 0) ThenBlock: {
+            Socket.Close(cfd)
+            SystemCall(CCSys.SYS_KILL, pid, CCSys.SIGKILL, 0, 0, 0)
+            _ws = Allocate(8) StoreValue(_ws, 0)
+            SystemCall(CCSys.SYS_WAIT4, pid, _ws, 0, 0, 0) Deallocate(_ws, 8)
+            StoreValue(out_is_error_ptr, 1, "dword")
+            ReturnValue(StringConcat("send failed: ", tname))
+        }
+
+        // Wait for response with 60s timeout
+        Socket.SetRecvTimeout(cfd, 60000)
+        resp_str = Socket.RecvMsg(cfd)
+        Socket.Close(cfd)
+
+        // Kill the worker
+        SystemCall(CCSys.SYS_KILL, pid, CCSys.SIGTERM, 0, 0, 0)
+        _ws = Allocate(8) StoreValue(_ws, 0)
+        // Non-blocking reap first
+        wr = SystemCall(CCSys.SYS_WAIT4, pid, _ws, 1, 0, 0)
+        IfCondition EqualTo(wr, 0) ThenBlock: {
+            SystemCall(CCSys.SYS_KILL, pid, CCSys.SIGKILL, 0, 0, 0)
+            SystemCall(CCSys.SYS_WAIT4, pid, _ws, 0, 0, 0)
+        }
+        Deallocate(_ws, 8)
+        // Remove from child_pids tracking
+        _ci = 0
+        WhileLoop LessThan(_ci, CCRunState.child_count) {
+            _cslot = Multiply(_ci, 8)
+            _cpid = Dereference(Add(CCRunState.child_pids, _cslot))
+            IfCondition EqualTo(_cpid, pid) ThenBlock: {
+                StoreValue(Add(CCRunState.child_pids, _cslot), 0)
+            }
+            _ci = Add(_ci, 1)
+        }
+
+        // Parse response
+        IfCondition EqualTo(resp_str, 0) ThenBlock: {
+            StoreValue(out_is_error_ptr, 1, "dword")
+            ReturnValue(StringConcat("tool timed out or crashed: ", tname))
+        }
+        IfCondition EqualTo(resp_str, -1) ThenBlock: {
+            StoreValue(out_is_error_ptr, 1, "dword")
+            ReturnValue(StringConcat("tool response too large: ", tname))
+        }
+        rparsed = ParseJSON(resp_str)
+        IfCondition EqualTo(rparsed, 0) ThenBlock: {
+            StoreValue(out_is_error_ptr, 1, "dword")
+            ReturnValue("invalid JSON response from tool")
+        }
+        robj = JSON.AsObject(rparsed)
+        IfCondition EqualTo(robj, 0) ThenBlock: {
+            StoreValue(out_is_error_ptr, 1, "dword")
+            ReturnValue("tool response was not an object")
+        }
+        ok = JSON.GetBool(robj, "ok")
+        IfCondition EqualTo(ok, 1) ThenBlock: {
+            content = JSON.GetString(robj, "content")
+            IfCondition EqualTo(content, 0) ThenBlock: { ReturnValue(resp_str) }
+            ReturnValue(content)
+        }
+        StoreValue(out_is_error_ptr, 1, "dword")
+        err = JSON.GetString(robj, "error")
+        IfCondition EqualTo(err, 0) ThenBlock: { ReturnValue("tool returned error (no detail)") }
+        ReturnValue(err)
+    }
+}
+
 Function.CC_MCP_HandleToolsCall {
     Input: id_raw: Address
     Input: params_obj: Address
@@ -3007,7 +3278,7 @@ Function.CC_MCP_HandleToolsCall {
         }
         is_err_buf = Allocate(8)
         StoreValue(is_err_buf, 0, "dword")
-        content = IPCDispatch.Dispatch(tname, targs, id_raw, is_err_buf)
+        content = CC_MCP_DispatchOnDemand(tname, targs, id_raw, is_err_buf)
         is_err = Dereference(is_err_buf)
         Deallocate(is_err_buf, 8)
         IfCondition EqualTo(content, 0) ThenBlock: { content = "" }
@@ -3085,29 +3356,46 @@ Function.CC_RunMCPMode {
 // =============================================================================
 SubRoutine.Main {
 
-    // Ignore SIGPIPE — broken pipe should return EPIPE from write(), not kill us.
-    // Without this, writing to a closed tool socket or dropped API connection
-    // terminates the process immediately.
+    // Ignore SIGPIPE, SIGINT, SIGTERM — prevents abrupt process death.
+    // SIGPIPE: broken pipe returns EPIPE from write() instead of killing us.
+    // SIGINT:  Ctrl+C is handled as byte 0x03 in UI.ReadLine (requires ISIG cleared).
+    // SIGTERM: external kill -15 is ignored; use /quit or kill -9 to force exit.
+    // Without SIGINT/SIGTERM ignored, the process dies before CC_KillAllChildren
+    // can reap children, leaving zombie tool services.
     sigact = Allocate(32)
     StoreValue(Add(sigact, 0), 1)    // sa_handler = SIG_IGN (1)
     StoreValue(Add(sigact, 8), 0)    // sa_flags = 0
     StoreValue(Add(sigact, 16), 0)   // sa_restorer = 0
     StoreValue(Add(sigact, 24), 0)   // sa_mask = 0
     SystemCall(13, 13, sigact, 0, 8, 0)  // rt_sigaction(SIGPIPE=13, &act, NULL, 8)
+    SystemCall(13, 2, sigact, 0, 8, 0)   // rt_sigaction(SIGINT=2,  &act, NULL, 8)
+    SystemCall(13, 15, sigact, 0, 8, 0)  // rt_sigaction(SIGTERM=15, &act, NULL, 8)
     Deallocate(sigact, 32)
 
     // MCP server mode: ./HalCode9000.x --mcp
-    // Boots tools, then speaks JSON-RPC 2.0 over stdio.
-    // Stdout is redirected to stderr during boot to keep the MCP stream clean.
+    // On-demand architecture: workers are spawned per tool call and killed after.
+    // No persistent daemon workers — zero zombies, zero idle CPU.
     mcp_flag = CC_HasArg("--mcp")
     IfCondition EqualTo(mcp_flag, 1) ThenBlock: {
+        // Restore default SIGINT/SIGTERM so Claude Code can kill us cleanly.
+        // MCP mode has no persistent children to protect.
+        mcp_sigact = Allocate(32)
+        StoreValue(Add(mcp_sigact, 0), 0)    // sa_handler = SIG_DFL (0)
+        StoreValue(Add(mcp_sigact, 8), 0)
+        StoreValue(Add(mcp_sigact, 16), 0)
+        StoreValue(Add(mcp_sigact, 24), 0)
+        SystemCall(13, 2, mcp_sigact, 0, 8, 0)   // rt_sigaction(SIGINT=2)
+        SystemCall(13, 15, mcp_sigact, 0, 8, 0)  // rt_sigaction(SIGTERM=15)
+        Deallocate(mcp_sigact, 32)
+
         CC_ChdirToBinDir()
+        CC_KillStaleTools()
         History.Init()
         IPCDispatch.Init()
         cred = CC_SetupAgentProvider("deepseek")
         CCConst.SYSTEM_PROMPT = "You are HAL Code 9000. Be concise."
         Backend.Init("apikey", cred, CCConst.SYSTEM_PROMPT)
-        // Respond to initialize immediately so health checks pass before the ~12s tool boot.
+        // Respond to initialize immediately so health checks pass before schema boot.
         mcp_init_buf = Allocate(16384)
         mcp_init_n = CC_MCP_ReadFrame(mcp_init_buf, 16384)
         IfCondition LessThan(mcp_init_n, 0) ThenBlock: {
@@ -3117,10 +3405,11 @@ SubRoutine.Main {
             mcp_init_id = CC_MCP_ExtractID(mcp_init_buf)
             CC_MCP_HandleInitialize(mcp_init_id)
         }
-        // Boot tools while redirecting boot messages to stderr.
+        // Boot schemas: launch each worker, fetch schema, kill it.
+        // Redirect boot messages to stderr to keep MCP stream clean.
         saved_out = SystemCall(CCSys.SYS_DUP, 1, 0, 0, 0, 0)
         SystemCall(CCSys.SYS_DUP2, 2, 1, 0, 0, 0)
-        CC_BootTools()
+        CC_MCP_BootSchemas()
         IfCondition GreaterEqual(saved_out, 0) ThenBlock: {
             SystemCall(CCSys.SYS_DUP2, saved_out, 1, 0, 0, 0)
             SystemCall(CCSys.SYS_CLOSE, saved_out, 0, 0, 0, 0)

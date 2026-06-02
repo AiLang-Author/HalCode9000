@@ -207,7 +207,18 @@ Function.UI.Init {
         UILayout.input_buf = Allocate(UILayout.input_cap)
 
         TUI_Init()
-        
+
+        // Clear ISIG from c_lflag so Ctrl+C delivers byte 0x03 to read() instead
+        // of generating SIGINT (which is SIG_IGN'd). This lets UI.ReadLine handle
+        // Ctrl+C as a clean /quit trigger. ISIG = bit 0 of c_lflag at offset 12.
+        _tios = Allocate(60)
+        SystemCall(UISys.SYS_IOCTL, 0, 21505, _tios, 0, 0)  // ioctl(0, TCGETS, _tios)
+        _lfb0 = GetByte(_tios, 12)
+        _lfb0 = BitwiseAnd(_lfb0, 254)  // 254 = ~1 = clear ISIG
+        SetByte(_tios, 12, _lfb0)
+        SystemCall(UISys.SYS_IOCTL, 0, 21506, _tios, 0, 0)  // ioctl(0, TCSETS, _tios)
+        Deallocate(_tios, 60)
+
         // EXIT ALTERNATE SCREEN BUFFER: This is the magic key to native scrollback!
         // TUI_Init puts us in the alt screen, which has no history. We immediately
         // exit it so we draw on the main buffer, preserving user scroll history.
@@ -1521,6 +1532,15 @@ Function.UI.ReadLine {
                 UI_RenderInput(len)
                 TUI_Refresh()
                 ContinueLoop
+            }
+
+            // Ctrl+C (0x03): treat as /quit for clean shutdown.
+            // ISIG is cleared so Ctrl+C arrives as byte 3 instead of SIGINT.
+            IfCondition EqualTo(key, 3) ThenBlock: {
+                TUI_HideCursor()
+                UILayout.input_len = 0
+                SetByte(UILayout.input_buf, 0, 0)
+                ReturnValue("/quit")
             }
 
             // ESC: bare ESC key — ignore silently during readline
