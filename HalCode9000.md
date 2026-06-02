@@ -9,7 +9,7 @@ explains the *why*.
 
 ---
 
-## Current Status (2026-04-29)
+## Current Status (2026-06-01)
 
 **Fully working end-to-end — UI polish complete.**
 Text streaming, multi-turn conversation, all 7 tools live. Animated mascot
