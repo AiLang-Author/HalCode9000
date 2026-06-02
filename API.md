@@ -1,6 +1,6 @@
 # Claude Code (AILang Native) — API Reference
 
-Companion to `ClaudeCode.md` (which is design rationale). This document is
+- This document is
 **reference material** — every wire protocol, every public function, every
 JSON shape. Read this when you want to extend the system.
 
