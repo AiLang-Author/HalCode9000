@@ -25,8 +25,24 @@ Build everything via `build.sh` from AILangSH root:
 
 - **6-arg syscall limit** — SysV AMD64 uses RDI/RSI/RDX/RCX/R8/R9. analyzer.x enforces this.
 - **StoreValue** defaults to 8-byte (qword). Use `StoreValue(addr, val, "dword")` for 4-byte writes.
-- **No trailing `\n` literal** — never end a `.ailang` file with backslash-n text; use a real newline byte.
+- **No trailing `\n` in string literals** — AILang supports `\n` mid-string (e.g. `"line1\nline2"`) but NOT as the very last escaped character: `"text\n"` is a syntax error. Use a literal newline between the last character and the closing `"` instead. This is the ONLY escape-sequence restriction.
 - **MemoryCopy/MemorySet** emit CLD + REP MOVSB/STOSB with register save/restore.
+
+### String Literals
+
+AILang **has string literals**: `"hello"`, `"error: %d\n"`. The compiler packs them as length-prefixed byte sequences in the data section with automatic null termination.
+
+- **No char literals** — `'x'` is a syntax error. For single bytes, use the integer ASCII code (e.g., `72` for `'H'`).
+- **Byte-by-byte construction** — when you need dynamic strings, use `Allocate` + `SetByte` to build them one byte at a time, then null-terminate:
+  ```
+  buf = Allocate(256)
+  SetByte(buf, 72)     // 'H'
+  SetByte(Add(buf, 1), 101)  // 'e'
+  SetByte(Add(buf, 2), 0)    // null terminator
+  ```
+- **ASCII-code scanning** — to detect patterns in raw bytes, compare against integer ASCII values: `H=72 O=79 M=77 E=69 ==61`. This is how `Auth_GetHome` finds `HOME=` in `/proc/self/environ`.
+- **StringConcat** (from lib-stringutils) joins two null-terminated strings into a new allocation.
+- **Trailing `\n` rule** (see above) is the only escape-sequence restriction — all other escapes work normally.
 
 ## Common Patterns
 
