@@ -1505,6 +1505,37 @@ Function.CC_RunDemo {
     }
 }
 
+// Runs the standalone Python aggregator script to fetch live model definitions from provider APIs
+Function.CC_RunModelScraper {
+    Output: Integer
+    Body: {
+        CC_PrintStepHeader("Provider Model Aggregator")
+        CC_WriteStdout("  Querying live model endpoints and updating provider configs...\n\n")
+        sh_pid = SystemCall(CCSys.SYS_FORK, 0, 0, 0, 0, 0)
+        IfCondition EqualTo(sh_pid, 0) ThenBlock: {
+            argv = Allocate(32)
+            sh_cmd = "python3 scripts/fetch_providers.py"
+            sh_path = "/bin/sh"
+            arg1 = "-c"
+            StoreValue(Add(argv, 0), sh_path)
+            StoreValue(Add(argv, 8), arg1)
+            StoreValue(Add(argv, 16), sh_cmd)
+            StoreValue(Add(argv, 24), 0)
+            envp = CC_BuildInheritedEnvp()
+            SystemCall(CCSys.SYS_EXECVE, sh_path, argv, envp)
+            SystemCall(CCSys.SYS_EXIT, 1, 0, 0, 0, 0)
+        }
+        IfCondition GreaterThan(sh_pid, 0) ThenBlock: {
+            wstat = Allocate(8)
+            SystemCall(CCSys.SYS_WAIT4, sh_pid, wstat, 0, 0, 0)
+            Deallocate(wstat, 8)
+        }
+        CC_WriteStdout("\n  Provider model definitions refreshed successfully.\n\n")
+        CC_SleepMs(500)
+        ReturnValue(1)
+    }
+}
+
 // Prompt user for a new provider connection and write it to
 // ~/.halcode/connections/conn_<ts>.json.  Returns 1 on success, 0 on cancel.
 Function.CC_PromptAddConnection {
@@ -1654,50 +1685,231 @@ Function.CC_MakeProvider {
     }
 }
 
+Function.CC_LoadAllProviderObjects {
+    Output: Address
+    Body: {
+        all_arr = Array.Create(32)
+        
+        // 1. Try loading user providers (~/.halcode/providers)
+        u_dir = CC_ExpandHome("~/.halcode/providers")
+        u_arr = Backend.LoadProviders(u_dir)
+        IfCondition NotEqual(u_arr, 0) ThenBlock: {
+            u_sz = Array.Size(u_arr)
+            ui = 0
+            WhileLoop LessThan(ui, u_sz) {
+                Array.Push(all_arr, Array.Get(u_arr, ui))
+                ui = Add(ui, 1)
+            }
+        }
+        
+        // 2. Load repo providers (providers)
+        r_arr = Backend.LoadProviders("providers")
+        IfCondition NotEqual(r_arr, 0) ThenBlock: {
+            r_sz = Array.Size(r_arr)
+            ri = 0
+            WhileLoop LessThan(ri, r_sz) {
+                pobj = Array.Get(r_arr, ri)
+                pname = JSON.GetString(pobj, "name")
+                
+                // Avoid adding duplicates if already loaded from user dir
+                dup = 0
+                all_sz = Array.Size(all_arr)
+                ai = 0
+                WhileLoop LessThan(ai, all_sz) {
+                    aobj = Array.Get(all_arr, ai)
+                    aname = JSON.GetString(aobj, "name")
+                    IfCondition And(NotEqual(pname, 0), NotEqual(aname, 0)) ThenBlock: {
+                        IfCondition EqualTo(StringCompare(pname, aname), 0) ThenBlock: {
+                            dup = 1
+                        }
+                    }
+                    ai = Add(ai, 1)
+                }
+                IfCondition EqualTo(dup, 0) ThenBlock: {
+                    Array.Push(all_arr, pobj)
+                }
+                ri = Add(ri, 1)
+            }
+        }
+
+        // 3. Load user custom connections (~/.halcode/connections)
+        c_dir = CC_ExpandHome("~/.halcode/connections")
+        c_arr = Backend.LoadProviders(c_dir)
+        IfCondition NotEqual(c_arr, 0) ThenBlock: {
+            c_sz = Array.Size(c_arr)
+            ci = 0
+            WhileLoop LessThan(ci, c_sz) {
+                Array.Push(all_arr, Array.Get(c_arr, ci))
+                ci = Add(ci, 1)
+            }
+        }
+
+        ReturnValue(all_arr)
+    }
+}
+
+Function.CC_PromptModelFromProvider {
+    Input: prov_obj: Address
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(prov_obj, 0) ThenBlock: { ReturnValue(1) }
+
+        pname = JSON.GetString(prov_obj, "name")
+        IfCondition EqualTo(pname, 0) ThenBlock: { pname = "Provider" }
+        def_model = JSON.GetString(prov_obj, "default_model")
+        IfCondition EqualTo(def_model, 0) ThenBlock: { def_model = "" }
+
+        models_arr = JSON.GetArray(prov_obj, "models")
+        mcount = 0
+        IfCondition NotEqual(models_arr, 0) ThenBlock: {
+            mcount = JSON.ArrayLength(models_arr)
+        }
+
+        IfCondition EqualTo(mcount, 0) ThenBlock: {
+            CC_WriteStdout("\n  ")
+            CC_WriteStdout(pname)
+            CC_WriteStdout(" Model Selection:\n")
+            CC_WriteStdout("    1) Default model  (")
+            CC_WriteStdout(def_model)
+            CC_WriteStdout(")\n")
+            CC_WriteStdout("    m) Enter model name manually\n")
+            CC_WriteStdout("    q) Back\n\n")
+            CC_WriteStdout("  Choice [1]: ")
+            mbuf = Allocate(64)
+            CC_ReadStdinLine(mbuf, 64)
+            mch = GetByte(mbuf, 0)
+            Deallocate(mbuf, 64)
+            IfCondition Or(EqualTo(mch, 113), EqualTo(mch, 81)) ThenBlock: { ReturnValue(0) }
+            IfCondition Or(EqualTo(mch, 109), EqualTo(mch, 77)) ThenBlock: {
+                CC_WriteStdout("  Model name: ")
+                manbuf = Allocate(128)
+                CC_ReadStdinLine(manbuf, 128)
+                IfCondition GreaterThan(StringLength(manbuf), 0) ThenBlock: {
+                    SelectedProvider.default_model = manbuf
+                }
+                Deallocate(manbuf, 128)
+            }
+            ReturnValue(1)
+        }
+
+        CC_WriteStdout("\n  ")
+        CC_WriteStdout(pname)
+        CC_WriteStdout(" Model Selection:\n")
+
+        mi = 0
+        WhileLoop LessThan(mi, mcount) {
+            met = JSON.ArrayGet(models_arr, mi)
+            mobj = JSON.AsObject(met)
+            mid = 0
+            mdisp = 0
+            IfCondition NotEqual(mobj, 0) ThenBlock: {
+                mid   = JSON.GetString(mobj, "id")
+                mdisp = JSON.GetString(mobj, "display")
+            }
+            IfCondition EqualTo(mid, 0) ThenBlock: { mid = "?" }
+            IfCondition EqualTo(mdisp, 0) ThenBlock: { mdisp = mid }
+
+            CC_WriteStdout("    ")
+            CC_WriteStdout(NumberToString(Add(mi, 1)))
+            CC_WriteStdout(") ")
+            CC_WriteStdout(mdisp)
+            IfCondition NotEqual(StringCompare(mdisp, mid), 0) ThenBlock: {
+                CC_WriteStdout("  (")
+                CC_WriteStdout(mid)
+                CC_WriteStdout(")")
+            }
+            IfCondition EqualTo(StringCompare(mid, def_model), 0) ThenBlock: {
+                CC_WriteStdout("  — default")
+            }
+            CC_WriteStdout("\n")
+            mi = Add(mi, 1)
+        }
+
+        CC_WriteStdout("    m) Enter model name manually\n")
+        CC_WriteStdout("    q) Back\n\n")
+        CC_WriteStdout("  Choice [1]: ")
+
+        mbuf = Allocate(64)
+        CC_ReadStdinLine(mbuf, 64)
+        mch = GetByte(mbuf, 0)
+        mval = StringToNumber(mbuf)
+        Deallocate(mbuf, 64)
+
+        IfCondition Or(EqualTo(mch, 113), EqualTo(mch, 81)) ThenBlock: { ReturnValue(0) }
+
+        IfCondition Or(EqualTo(mch, 109), EqualTo(mch, 77)) ThenBlock: {
+            CC_WriteStdout("  Model name: ")
+            manbuf = Allocate(128)
+            CC_ReadStdinLine(manbuf, 128)
+            IfCondition GreaterThan(StringLength(manbuf), 0) ThenBlock: {
+                SelectedProvider.default_model = manbuf
+            }
+            Deallocate(manbuf, 128)
+            ReturnValue(1)
+        }
+
+        // If user pressed Enter (mval == 0 and mch == 10 or 0), select default model [1]
+        IfCondition And(EqualTo(mval, 0), Or(EqualTo(mch, 10), EqualTo(mch, 0))) ThenBlock: {
+            mval = 1
+        }
+
+        IfCondition And(GreaterEqual(mval, 1), LessEqual(mval, mcount)) ThenBlock: {
+            chosen_met = JSON.ArrayGet(models_arr, Subtract(mval, 1))
+            chosen_mobj = JSON.AsObject(chosen_met)
+            IfCondition NotEqual(chosen_mobj, 0) ThenBlock: {
+                chosen_mid = JSON.GetString(chosen_mobj, "id")
+                IfCondition NotEqual(chosen_mid, 0) ThenBlock: {
+                    SelectedProvider.default_model = chosen_mid
+                    IfCondition Or(EqualTo(StringCompare(chosen_mid, "deepseek-reasoner"), 0), EqualTo(StringCompare(chosen_mid, "deepseek/deepseek-r1"), 0)) ThenBlock: {
+                        SelectedProvider.reasoning_effort = "medium"
+                    } ElseBlock: {
+                        SelectedProvider.reasoning_effort = 0
+                    }
+                }
+            }
+        }
+        ReturnValue(1)
+    }
+}
+
 Function.CC_PromptProvider {
     Output: Integer
     Body: {
-        // Load user-defined connections once before the menu loop
-        conn_dir = CC_ExpandHome("~/.halcode/connections")
-        custom_arr = Backend.LoadProviders(conn_dir)
-        custom_count = 0
-        IfCondition NotEqual(custom_arr, 0) ThenBlock: {
-            custom_count = Array.Size(custom_arr)
+        prov_arr = CC_LoadAllProviderObjects()
+        prov_count = 0
+        IfCondition NotEqual(prov_arr, 0) ThenBlock: {
+            prov_count = Array.Size(prov_arr)
         }
 
         prov = 0
         done = 0
         WhileLoop EqualTo(done, 0) {
             CC_PrintStepHeader("STEP 2: Model Selection")
-            CC_WriteStdout("  --- Built-in ---\n")
-            CC_WriteStdout("  1. Anthropic    (claude-sonnet-4-6)\n")
-            CC_WriteStdout("  2. OpenAI       (gpt-4o)\n")
-            CC_WriteStdout("  3. Grok         (xAI — grok-3)\n")
-            CC_WriteStdout("  4. Google       (Gemini — model select)\n")
-            CC_WriteStdout("  5. DeepSeek     (deepseek-v4-flash)\n")
-            CC_WriteStdout("  6. OpenRouter   (300+ models)\n")
+            CC_WriteStdout("  Select AI Provider:\n")
 
-            IfCondition GreaterThan(custom_count, 0) ThenBlock: {
-                CC_WriteStdout("\n  --- User Connections ---\n")
-                ci = 0
-                WhileLoop LessThan(ci, custom_count) {
-                    cobj = Array.Get(custom_arr, ci)
-                    cname  = JSON.GetString(cobj, "name")
-                    cmodel = JSON.GetString(cobj, "default_model")
-                    IfCondition EqualTo(cname, 0) ThenBlock: { cname = "?" }
-                    IfCondition EqualTo(cmodel, 0) ThenBlock: { cmodel = "?" }
-                    CC_WriteStdout("  ")
-                    CC_WriteStdout(NumberToString(Add(ci, 7)))
-                    CC_WriteStdout(". ")
-                    CC_WriteStdout(cname)
+            pi = 0
+            WhileLoop LessThan(pi, prov_count) {
+                pobj = Array.Get(prov_arr, pi)
+                pname = JSON.GetString(pobj, "name")
+                pmodel = JSON.GetString(pobj, "default_model")
+                IfCondition EqualTo(pname, 0) ThenBlock: { pname = "Custom" }
+                IfCondition EqualTo(pmodel, 0) ThenBlock: { pmodel = "" }
+
+                CC_WriteStdout("  ")
+                CC_WriteStdout(NumberToString(Add(pi, 1)))
+                CC_WriteStdout(". ")
+                CC_WriteStdout(pname)
+                IfCondition GreaterThan(StringLength(pmodel), 0) ThenBlock: {
                     CC_WriteStdout("  (")
-                    CC_WriteStdout(cmodel)
-                    CC_WriteStdout(")\n")
-                    ci = Add(ci, 1)
+                    CC_WriteStdout(pmodel)
+                    CC_WriteStdout(")")
                 }
+                CC_WriteStdout("\n")
+                pi = Add(pi, 1)
             }
 
-            CC_WriteStdout("\n  a. Add connection\n")
+            CC_WriteStdout("\n  r. Refresh models from API\n")
+            CC_WriteStdout("  a. Add connection\n")
             CC_WriteStdout("  0. Quit\n\n")
             CC_WriteStdout(" Choice [1]: ")
 
@@ -1707,15 +1919,25 @@ Function.CC_PromptProvider {
             first_ch = GetByte(line_buf, 0)
             Deallocate(line_buf, 16)
 
+            // Refresh models from API — 'r' or 'R'
+            IfCondition Or(EqualTo(first_ch, 114), EqualTo(first_ch, 82)) ThenBlock: {
+                CC_RunModelScraper()
+                prov_arr = CC_LoadAllProviderObjects()
+                prov_count = 0
+                IfCondition NotEqual(prov_arr, 0) ThenBlock: {
+                    prov_count = Array.Size(prov_arr)
+                }
+                ContinueLoop
+            }
+
             // Add connection — check BEFORE quit so 'a' is not misread as choice=0
             IfCondition Or(EqualTo(first_ch, 97), EqualTo(first_ch, 65)) ThenBlock: {
                 added = CC_PromptAddConnection()
                 IfCondition EqualTo(added, 1) ThenBlock: {
-                    conn_dir2 = CC_ExpandHome("~/.halcode/connections")
-                    custom_arr = Backend.LoadProviders(conn_dir2)
-                    custom_count = 0
-                    IfCondition NotEqual(custom_arr, 0) ThenBlock: {
-                        custom_count = Array.Size(custom_arr)
+                    prov_arr = CC_LoadAllProviderObjects()
+                    prov_count = 0
+                    IfCondition NotEqual(prov_arr, 0) ThenBlock: {
+                        prov_count = Array.Size(prov_arr)
                     }
                 }
                 ContinueLoop
@@ -1727,145 +1949,40 @@ Function.CC_PromptProvider {
                 done = 1
             }
 
-            // 1 — Anthropic
-            IfCondition EqualTo(choice, 1) ThenBlock: {
-                prov = CC_MakeProvider("Anthropic","anthropic","https://api.anthropic.com",
-                                       "/v1/messages",           "claude-sonnet-4-6", "anthropic")
-                done = 1
-            }
-            // 2 — OpenAI
-            IfCondition EqualTo(choice, 2) ThenBlock: {
-                prov = CC_MakeProvider("OpenAI",   "openai",   "https://api.openai.com",
-                                       "/v1/chat/completions",   "gpt-4o",   "openai")
-                done = 1
-            }
-            // 3 — Grok
-            IfCondition EqualTo(choice, 3) ThenBlock: {
-                prov = CC_MakeProvider("Grok",     "openai",   "https://api.x.ai",
-                                       "/v1/chat/completions",   "grok-3",   "xai")
-                done = 1
-            }
-            // 4 — Google with model sub-menu
-            IfCondition EqualTo(choice, 4) ThenBlock: {
-                prov = CC_MakeProvider("Google", "gemini", "https://generativelanguage.googleapis.com",
-                                       "/v1beta/openai/chat/completions", "gemini-3.1-pro-preview", "google_pro31")
-                CC_WriteStdout("\n  Gemini model:\n")
-                CC_WriteStdout("    a) gemini-3.1-pro-preview   (powerful, default)\n")
-                CC_WriteStdout("    b) gemini-3-flash-preview   (fast, reasoning)\n")
-                CC_WriteStdout("    c) gemini-2.5-flash         (stable)\n")
-                CC_WriteStdout("    d) gemini-2.5-flash-lite    (cheapest)\n")
-                CC_WriteStdout("    q) Back\n\n")
-                CC_WriteStdout("  Choice [a]: ")
-                gmbuf = Allocate(16)
-                CC_ReadStdinLine(gmbuf, 16)
-                gmch = GetByte(gmbuf, 0)
-                Deallocate(gmbuf, 16)
-                IfCondition Or(EqualTo(gmch, 113), EqualTo(gmch, 81)) ThenBlock: { ContinueLoop }
-                IfCondition Or(EqualTo(gmch, 98), EqualTo(gmch, 66)) ThenBlock: {
-                    SelectedProvider.default_model = "gemini-3-flash-preview"
-                    SelectedProvider.key_hint      = "google_flash3"
-                }
-                IfCondition Or(EqualTo(gmch, 99), EqualTo(gmch, 67)) ThenBlock: {
-                    SelectedProvider.default_model = "gemini-2.5-flash"
-                    SelectedProvider.key_hint      = "google_flash"
-                }
-                IfCondition Or(EqualTo(gmch, 100), EqualTo(gmch, 68)) ThenBlock: {
-                    SelectedProvider.default_model = "gemini-2.5-flash-lite"
-                    SelectedProvider.key_hint      = "google_lite"
-                }
-                done = 1
-            }
-            // 5 — DeepSeek with model sub-menu
-            IfCondition EqualTo(choice, 5) ThenBlock: {
-                prov = CC_MakeProvider("DeepSeek", "openai",   "https://api.deepseek.com",
-                                       "/v1/chat/completions",   "deepseek-v4-pro", "deepseek")
-                SelectedProvider.reasoning_effort = "medium"
-                CC_WriteStdout("\n  DeepSeek model:\n")
-                CC_WriteStdout("    a) deepseek-v4-pro   (reasoning)\n")
-                CC_WriteStdout("    b) deepseek-v4-flash (fast)\n")
-                CC_WriteStdout("    q) Back\n\n")
-                CC_WriteStdout("  Choice [a]: ")
-                mbuf = Allocate(16)
-                CC_ReadStdinLine(mbuf, 16)
-                mch = GetByte(mbuf, 0)
-                Deallocate(mbuf, 16)
-                IfCondition Or(EqualTo(mch, 113), EqualTo(mch, 81)) ThenBlock: { ContinueLoop }
-                IfCondition Or(EqualTo(mch, 98), EqualTo(mch, 66)) ThenBlock: {
-                    SelectedProvider.default_model    = "deepseek-v4-flash"
-                    SelectedProvider.reasoning_effort = 0
-                }
-                done = 1
-            }
-            // 6 — OpenRouter with model sub-menu
-            IfCondition EqualTo(choice, 6) ThenBlock: {
-                prov = CC_MakeProvider("OpenRouter","openai",  "https://openrouter.ai/api",
-                                       "/v1/chat/completions",  "anthropic/claude-sonnet-4", "openrouter")
-                CC_WriteStdout("\n  OpenRouter model:\n")
-                CC_WriteStdout("    a) anthropic/claude-sonnet-4              (recommended)\n")
-                CC_WriteStdout("    b) openai/gpt-4o                          (OpenAI)\n")
-                CC_WriteStdout("    c) google/gemini-2.5-flash-preview        (Google)\n")
-                CC_WriteStdout("    d) meta-llama/llama-3.3-70b-instruct:free (free)\n")
-                CC_WriteStdout("    e) deepseek/deepseek-chat-v3-0324:free    (free)\n")
-                CC_WriteStdout("    m) Enter model name manually\n")
-                CC_WriteStdout("    q) Back\n\n")
-                CC_WriteStdout("  Choice [a]: ")
-                orbuf = Allocate(16)
-                CC_ReadStdinLine(orbuf, 16)
-                orch = GetByte(orbuf, 0)
-                Deallocate(orbuf, 16)
-                IfCondition Or(EqualTo(orch, 113), EqualTo(orch, 81)) ThenBlock: { ContinueLoop }
-                IfCondition Or(EqualTo(orch, 98), EqualTo(orch, 66)) ThenBlock: {
-                    SelectedProvider.default_model = "openai/gpt-4o"
-                }
-                IfCondition Or(EqualTo(orch, 99), EqualTo(orch, 67)) ThenBlock: {
-                    SelectedProvider.default_model = "google/gemini-2.5-flash-preview"
-                }
-                IfCondition Or(EqualTo(orch, 100), EqualTo(orch, 68)) ThenBlock: {
-                    SelectedProvider.default_model = "meta-llama/llama-3.3-70b-instruct:free"
-                }
-                IfCondition Or(EqualTo(orch, 101), EqualTo(orch, 69)) ThenBlock: {
-                    SelectedProvider.default_model = "deepseek/deepseek-chat-v3-0324:free"
-                }
-                IfCondition Or(EqualTo(orch, 109), EqualTo(orch, 77)) ThenBlock: {
-                    CC_WriteStdout("  Model name: ")
-                    manbuf = Allocate(128)
-                    CC_ReadStdinLine(manbuf, 128)
-                    IfCondition GreaterThan(StringLength(manbuf), 0) ThenBlock: {
-                        SelectedProvider.default_model = manbuf
-                    }
-                }
-                done = 1
-            }
-
-            // User connections (slots 7+)
+            // Dynamic provider selection from loaded prov_arr (slots 1..prov_count)
             IfCondition EqualTo(done, 0) ThenBlock: {
-                max_custom = Add(custom_count, 7)
-                IfCondition And(GreaterEqual(choice, 7), LessThan(choice, max_custom)) ThenBlock: {
-                    ci = Subtract(choice, 7)
-                    cobj = Array.Get(custom_arr, ci)
-                    cn   = JSON.GetString(cobj, "name")
-                    cbk  = JSON.GetString(cobj, "backend")
-                    curl = JSON.GetString(cobj, "base_url")
-                    cap  = JSON.GetString(cobj, "api_path")
-                    cmdl = JSON.GetString(cobj, "default_model")
-                    ckh  = JSON.GetString(cobj, "key_hint")
+                // Default choice [1] if user pressed enter (choice==0 and first_ch==10 or 0)
+                IfCondition And(EqualTo(choice, 0), Or(EqualTo(first_ch, 10), EqualTo(first_ch, 0))) ThenBlock: {
+                    choice = 1
+                }
+
+                IfCondition And(GreaterEqual(choice, 1), LessEqual(choice, prov_count)) ThenBlock: {
+                    chosen_pobj = Array.Get(prov_arr, Subtract(choice, 1))
+                    cn   = JSON.GetString(chosen_pobj, "name")
+                    cbk  = JSON.GetString(chosen_pobj, "backend")
+                    curl = JSON.GetString(chosen_pobj, "base_url")
+                    cap  = JSON.GetString(chosen_pobj, "api_path")
+                    cmdl = JSON.GetString(chosen_pobj, "default_model")
+                    ckh  = JSON.GetString(chosen_pobj, "key_hint")
+                    creas = JSON.GetString(chosen_pobj, "reasoning_effort")
+
                     IfCondition EqualTo(cn, 0) ThenBlock: { cn = "Custom" }
                     IfCondition EqualTo(cbk, 0) ThenBlock: { cbk = "openai" }
                     IfCondition EqualTo(curl, 0) ThenBlock: { curl = "" }
                     IfCondition EqualTo(cap, 0) ThenBlock: { cap = "/v1/chat/completions" }
                     IfCondition EqualTo(cmdl, 0) ThenBlock: { cmdl = "" }
                     IfCondition EqualTo(ckh, 0) ThenBlock: { ckh = "apikey" }
-                    prov = CC_MakeProvider(cn, cbk, curl, cap, cmdl, ckh)
-                    done = 1
-                }
-            }
 
-            // Default: unrecognised input → Anthropic
-            IfCondition EqualTo(prov, 0) ThenBlock: {
-                IfCondition EqualTo(done, 0) ThenBlock: {
-                    prov = CC_MakeProvider("Anthropic","anthropic","https://api.anthropic.com",
-                                           "/v1/messages",       "claude-sonnet-4-6", "anthropic")
-                    done = 1
+                    prov = CC_MakeProvider(cn, cbk, curl, cap, cmdl, ckh)
+                    IfCondition NotEqual(creas, 0) ThenBlock: {
+                        SelectedProvider.reasoning_effort = creas
+                    }
+
+                    // Launch interstage model picker for this selected provider!
+                    mok = CC_PromptModelFromProvider(chosen_pobj)
+                    IfCondition EqualTo(mok, 1) ThenBlock: {
+                        done = 1
+                    }
                 }
             }
         }
@@ -1878,6 +1995,409 @@ Function.CC_PromptProvider {
             CC_SleepMs(400)
         }
         ReturnValue(prov)
+    }
+}
+
+// =============================================================================
+// PGMEM UNIFIED SESSION MANAGEMENT & COMPACTION
+// =============================================================================
+Function.CC_RandomUint16 {
+    Output: Integer
+    Body: {
+        buf = Allocate(2)
+        fd = SystemCall(CCSys.SYS_OPEN, "/dev/urandom", 0, 0, 0, 0)
+        IfCondition GreaterEqual(fd, 0) ThenBlock: {
+            SystemCall(CCSys.SYS_READ, fd, buf, 2, 0, 0)
+            SystemCall(CCSys.SYS_CLOSE, fd, 0, 0, 0, 0)
+            val = Add(GetByte(buf, 0), Multiply(GetByte(buf, 1), 256))
+            Deallocate(buf, 2)
+            ReturnValue(val)
+        }
+        Deallocate(buf, 2)
+        ReturnValue(12345)
+    }
+}
+
+Function.CC_GenerateSessionGUID {
+    Output: Address
+    Body: {
+        ts = SystemCall(CCSys.SYS_TIME, 0, 0, 0, 0, 0)
+        rand_val = CC_RandomUint16()
+        ts_str = NumberToString(ts)
+        r_str  = NumberToString(rand_val)
+        res = StringConcat("sess-", ts_str)
+        res = StringConcat(res, "-")
+        res = StringConcat(res, r_str)
+        ReturnValue(res)
+    }
+}
+
+Function.CC_SaveSessionToPgmem {
+    Output: Integer
+    Body: {
+        sid = History.GetSessionID()
+        IfCondition EqualTo(sid, 0) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(StringLength(sid), 0) ThenBlock: { ReturnValue(0) }
+
+        title = History.GetTitle()
+        IfCondition EqualTo(title, 0) ThenBlock: { title = "Untitled Session" }
+
+        hist_json = History.SerializeToJSON()
+
+        // 1. Park history
+        h_key = StringConcat("session:", sid)
+        h_key = StringConcat(h_key, ":history")
+
+        h_args = JSON.NewObject()
+        JSON.SetString(h_args, "op", "park")
+        JSON.SetString(h_args, "key", h_key)
+        JSON.SetString(h_args, "kind", "session_history")
+        JSON.SetString(h_args, "scope", "persistent")
+        JSON.SetString(h_args, "content", hist_json)
+
+        perr = Allocate(8)
+        StoreValue(perr, 0, "dword")
+        IPCDispatch.Dispatch("Pgmem", h_args, 0, perr)
+        Deallocate(perr, 8)
+
+        // 2. Park metadata
+        meta_obj = JSON.NewObject()
+        JSON.SetString(meta_obj, "id", sid)
+        JSON.SetString(meta_obj, "title", title)
+        IfCondition NotEqual(SelectedProvider.name, 0) ThenBlock: {
+            JSON.SetString(meta_obj, "provider", SelectedProvider.name)
+        }
+        IfCondition NotEqual(SelectedProvider.default_model, 0) ThenBlock: {
+            JSON.SetString(meta_obj, "model", SelectedProvider.default_model)
+        }
+        JSON.SetNumber(meta_obj, "turns", History.Count())
+        ts = SystemCall(CCSys.SYS_TIME, 0, 0, 0, 0, 0)
+        JSON.SetNumber(meta_obj, "updated_at", ts)
+        meta_json = JSON.SerializeObject(meta_obj)
+
+        m_key = StringConcat("session:", sid)
+        m_key = StringConcat(m_key, ":meta")
+
+        m_args = JSON.NewObject()
+        JSON.SetString(m_args, "op", "park")
+        JSON.SetString(m_args, "key", m_key)
+        JSON.SetString(m_args, "kind", "session_meta")
+        JSON.SetString(m_args, "scope", "persistent")
+        JSON.SetString(m_args, "content", meta_json)
+
+        perr2 = Allocate(8)
+        StoreValue(perr2, 0, "dword")
+        IPCDispatch.Dispatch("Pgmem", m_args, 0, perr2)
+        Deallocate(perr2, 8)
+
+        // 3. Update sessions:last
+        l_args = JSON.NewObject()
+        JSON.SetString(l_args, "op", "park")
+        JSON.SetString(l_args, "key", "sessions:last")
+        JSON.SetString(l_args, "kind", "session_meta")
+        JSON.SetString(l_args, "scope", "persistent")
+        JSON.SetString(l_args, "content", sid)
+        perr3 = Allocate(8)
+        StoreValue(perr3, 0, "dword")
+        IPCDispatch.Dispatch("Pgmem", l_args, 0, perr3)
+        Deallocate(perr3, 8)
+
+        ReturnValue(1)
+    }
+}
+
+Function.CC_LoadSessionFromPgmem {
+    Input: sid: Address
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(sid, 0) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(StringLength(sid), 0) ThenBlock: { ReturnValue(0) }
+
+        // Fetch history
+        h_key = StringConcat("session:", sid)
+        h_key = StringConcat(h_key, ":history")
+
+        h_args = JSON.NewObject()
+        JSON.SetString(h_args, "op", "pickup")
+        JSON.SetString(h_args, "key", h_key)
+        perr = Allocate(8)
+        StoreValue(perr, 0, "dword")
+        h_resp = IPCDispatch.Dispatch("Pgmem", h_args, 0, perr)
+        err = Dereference(perr, "dword")
+        Deallocate(perr, 8)
+
+        IfCondition Or(EqualTo(err, 1), EqualTo(h_resp, 0)) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(StringLength(h_resp), 0) ThenBlock: { ReturnValue(0) }
+
+        h_parsed = ParseJSON(h_resp)
+        h_obj = JSON.AsObject(h_parsed)
+        history_json = 0
+        IfCondition NotEqual(h_obj, 0) ThenBlock: {
+            history_json = JSON.GetString(h_obj, "content")
+        }
+        ok = History.LoadFromJSON(history_json)
+        IfCondition EqualTo(ok, 1) ThenBlock: {
+            History.SetSessionID(sid)
+
+            // Fetch meta title
+            m_key = StringConcat("session:", sid)
+            m_key = StringConcat(m_key, ":meta")
+            m_args = JSON.NewObject()
+            JSON.SetString(m_args, "op", "pickup")
+            JSON.SetString(m_args, "key", m_key)
+            perr2 = Allocate(8)
+            StoreValue(perr2, 0, "dword")
+            m_resp = IPCDispatch.Dispatch("Pgmem", m_args, 0, perr2)
+            err2 = Dereference(perr2, "dword")
+            Deallocate(perr2, 8)
+
+            IfCondition And(EqualTo(err2, 0), NotEqual(m_resp, 0)) ThenBlock: {
+                m_obj = JSON.AsObject(ParseJSON(m_resp))
+                IfCondition NotEqual(m_obj, 0) ThenBlock: {
+                    title = JSON.GetString(m_obj, "title")
+                    IfCondition NotEqual(title, 0) ThenBlock: {
+                        History.SetTitle(title)
+                    }
+                }
+            }
+            ReturnValue(1)
+        }
+        ReturnValue(0)
+    }
+}
+
+Function.CC_ResumeLastSession {
+    Output: Integer
+    Body: {
+        l_args = JSON.NewObject()
+        JSON.SetString(l_args, "op", "pickup")
+        JSON.SetString(l_args, "key", "sessions:last")
+        perr = Allocate(8)
+        StoreValue(perr, 0, "dword")
+        last_sid = IPCDispatch.Dispatch("Pgmem", l_args, 0, perr)
+        err = Dereference(perr, "dword")
+        Deallocate(perr, 8)
+
+        IfCondition Or(EqualTo(err, 1), EqualTo(last_sid, 0)) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(StringLength(last_sid), 0) ThenBlock: { ReturnValue(0) }
+
+        l_obj = JSON.AsObject(ParseJSON(last_sid))
+        IfCondition EqualTo(l_obj, 0) ThenBlock: { ReturnValue(0) }
+        actual_sid = JSON.GetString(l_obj, "content")
+        ReturnValue(CC_LoadSessionFromPgmem(actual_sid))
+    }
+}
+
+Function.CC_SelectAndLoadSession {
+    Output: Integer
+    Body: {
+        s_args = JSON.NewObject()
+        JSON.SetString(s_args, "op", "search")
+        JSON.SetString(s_args, "query", "session:")
+        JSON.SetString(s_args, "kind", "session_meta")
+        JSON.SetString(s_args, "scope", "persistent")
+        perr = Allocate(8)
+        StoreValue(perr, 0, "dword")
+        resp = IPCDispatch.Dispatch("Pgmem", s_args, 0, perr)
+        err = Dereference(perr, "dword")
+        Deallocate(perr, 8)
+
+        IfCondition Or(EqualTo(err, 1), EqualTo(resp, 0)) ThenBlock: {
+            CC_WriteStdout("[session] No saved sessions found in Pgmem.\n")
+            ReturnValue(0)
+        }
+
+        parsed = JSON.AsObject(ParseJSON(resp))
+        IfCondition EqualTo(parsed, 0) ThenBlock: {
+            CC_WriteStdout("[session] No saved sessions found in Pgmem.\n")
+            ReturnValue(0)
+        }
+
+        rows = JSON.GetArray(parsed, "rows")
+        IfCondition EqualTo(rows, 0) ThenBlock: {
+            CC_WriteStdout("[session] No saved sessions found in Pgmem.\n")
+            ReturnValue(0)
+        }
+
+        n_rows = JSON.ArrayLength(rows)
+        IfCondition LessEqual(n_rows, 0) ThenBlock: {
+            CC_WriteStdout("[session] No saved sessions found in Pgmem.\n")
+            ReturnValue(0)
+        }
+
+        CC_WriteStdout("\nSaved Sessions in Pgmem:\n")
+        sids = JSON.NewArray()
+        i = 0
+        WhileLoop LessThan(i, n_rows) {
+            row_tag = JSON.ArrayGet(rows, i)
+            row = JSON.AsObject(row_tag)
+            IfCondition NotEqual(row, 0) ThenBlock: {
+                content_str = JSON.GetString(row, "content")
+                IfCondition NotEqual(content_str, 0) ThenBlock: {
+                    m_obj = JSON.AsObject(ParseJSON(content_str))
+                    IfCondition NotEqual(m_obj, 0) ThenBlock: {
+                        sid = JSON.GetString(m_obj, "id")
+                        title = JSON.GetString(m_obj, "title")
+                        model = JSON.GetString(m_obj, "model")
+                        turns = JSON.GetNumber(m_obj, "turns")
+                        IfCondition EqualTo(title, 0) ThenBlock: { title = "Untitled" }
+                        IfCondition EqualTo(model, 0) ThenBlock: { model = "Unknown" }
+
+                        JSON.PushObject(sids, m_obj)
+
+                        CC_WriteStdout("  ")
+                        CC_WriteStdout(NumberToString(Add(i, 1)))
+                        CC_WriteStdout(". [")
+                        CC_WriteStdout(sid)
+                        CC_WriteStdout("] ")
+                        CC_WriteStdout(title)
+                        CC_WriteStdout(" (")
+                        CC_WriteStdout(NumberToString(turns))
+                        CC_WriteStdout(" turns, ")
+                        CC_WriteStdout(model)
+                        CC_WriteStdout(")\n")
+                    }
+                }
+            }
+            i = Add(i, 1)
+        }
+
+        total_sids = JSON.ArrayLength(sids)
+        IfCondition LessEqual(total_sids, 0) ThenBlock: {
+            CC_WriteStdout("[session] No valid sessions parsed.\n")
+            ReturnValue(0)
+        }
+
+        CC_WriteStdout("\nSelect session number to load [1]: ")
+        buf = Allocate(64)
+        n_in = CC_ReadStdinLine(buf, 64)
+        idx = 1
+        IfCondition GreaterThan(n_in, 0) ThenBlock: {
+            val = StringToInt(buf)
+            IfCondition And(GreaterEqual(val, 1), LessEqual(val, total_sids)) ThenBlock: {
+                idx = val
+            }
+        }
+        Deallocate(buf, 64)
+
+        chosen_tag = JSON.ArrayGet(sids, Subtract(idx, 1))
+        chosen_obj = JSON.AsObject(chosen_tag)
+        IfCondition NotEqual(chosen_obj, 0) ThenBlock: {
+            target_sid = JSON.GetString(chosen_obj, "id")
+            IfCondition NotEqual(target_sid, 0) ThenBlock: {
+                CC_WriteStdout("\n[session] Loading session ")
+                CC_WriteStdout(target_sid)
+                CC_WriteStdout("...\n")
+                ReturnValue(CC_LoadSessionFromPgmem(target_sid))
+            }
+        }
+        ReturnValue(0)
+    }
+}
+
+Function.CC_CompactSession {
+    Output: Integer
+    Body: {
+        sid = History.GetSessionID()
+        IfCondition EqualTo(sid, 0) ThenBlock: { ReturnValue(0) }
+
+        ts = SystemCall(CCSys.SYS_TIME, 0, 0, 0, 0, 0)
+        ts_str = NumberToString(ts)
+
+        snap_key = StringConcat("session:", sid)
+        snap_key = StringConcat(snap_key, ":snapshot:")
+        snap_key = StringConcat(snap_key, ts_str)
+
+        hist_json = History.SerializeToJSON()
+
+        s_args = JSON.NewObject()
+        JSON.SetString(s_args, "op", "park")
+        JSON.SetString(s_args, "key", snap_key)
+        JSON.SetString(s_args, "kind", "session_snapshot")
+        JSON.SetString(s_args, "scope", "persistent")
+        JSON.SetString(s_args, "content", hist_json)
+
+        perr = Allocate(8)
+        StoreValue(perr, 0, "dword")
+        IPCDispatch.Dispatch("Pgmem", s_args, 0, perr)
+        Deallocate(perr, 8)
+
+        count = History.Count()
+        summary_msg = StringConcat("[compaction] Context condensed at ", ts_str)
+        summary_msg = StringConcat(summary_msg, ". Raw snapshot parked in pgmem under ")
+        summary_msg = StringConcat(summary_msg, snap_key)
+        summary_msg = StringConcat(summary_msg, ". (Prior turns: ")
+        summary_msg = StringConcat(summary_msg, NumberToString(count))
+        summary_msg = StringConcat(summary_msg, ")")
+
+        History.Clear()
+        History.AppendAssistantText(summary_msg)
+
+        CC_SaveSessionToPgmem()
+        ReturnValue(1)
+    }
+}
+
+Function.CC_PromptSessionMenu {
+    Output: Integer
+    Body: {
+        CC_PrintStepHeader("STEP 4: Work Scope & Session Management")
+        CC_WriteStdout(" Select session option:\n")
+        CC_WriteStdout("  [1] Start New Session (Default - auto-generates new GUID)\n")
+        CC_WriteStdout("  [2] Load Saved Session from Pgmem\n")
+        CC_WriteStdout("  [3] Quick Resume Last Session\n")
+        CC_WriteStdout("  [q] Quit\n\n")
+        CC_WriteStdout(" Choice [1]: ")
+
+        buf = Allocate(64)
+        n = CC_ReadStdinLine(buf, 64)
+        choice = 1
+        first_ch = 0
+        IfCondition GreaterThan(n, 0) ThenBlock: {
+            first_ch = GetByte(buf, 0)
+            IfCondition Or(EqualTo(first_ch, 113), EqualTo(first_ch, 81)) ThenBlock: {
+                Deallocate(buf, 64)
+                ReturnValue(0)
+            }
+            IfCondition And(GreaterEqual(first_ch, 49), LessEqual(first_ch, 51)) ThenBlock: {
+                choice = Subtract(first_ch, 48)
+            }
+        }
+        Deallocate(buf, 64)
+
+        IfCondition EqualTo(choice, 1) ThenBlock: {
+            guid = CC_GenerateSessionGUID()
+            History.SetSessionID(guid)
+            History.SetTitle("New Session")
+            CC_SaveSessionToPgmem()
+            CC_WriteStdout("\n[session] Created new session: ")
+            CC_WriteStdout(guid)
+            CC_WriteStdout("\n")
+        }
+
+        IfCondition EqualTo(choice, 2) ThenBlock: {
+            loaded = CC_SelectAndLoadSession()
+            IfCondition EqualTo(loaded, 0) ThenBlock: {
+                guid = CC_GenerateSessionGUID()
+                History.SetSessionID(guid)
+                History.SetTitle("New Session")
+                CC_SaveSessionToPgmem()
+            }
+        }
+
+        IfCondition EqualTo(choice, 3) ThenBlock: {
+            loaded = CC_ResumeLastSession()
+            IfCondition EqualTo(loaded, 0) ThenBlock: {
+                CC_WriteStdout("[session] No recent session found in Pgmem. Starting new session.\n")
+                guid = CC_GenerateSessionGUID()
+                History.SetSessionID(guid)
+                History.SetTitle("New Session")
+                CC_SaveSessionToPgmem()
+            }
+        }
+
+        CC_SleepMs(400)
+        ReturnValue(1)
     }
 }
 
@@ -2044,6 +2564,8 @@ Function.CC_RunAuth {
                 ContinueLoop
             }
             auth_ok = 1
+            sess_ok = CC_PromptSessionMenu()
+            IfCondition EqualTo(sess_ok, 0) ThenBlock: { ReturnValue(0) }
         }
         ReturnValue(auth_result)
     }
@@ -2160,6 +2682,79 @@ Function.CC_BootTools {
     }
 }
 
+Function.CC_ListSessionsTUI {
+    Body: {
+        s_args = JSON.NewObject()
+        JSON.SetString(s_args, "op", "search")
+        JSON.SetString(s_args, "query", "session:")
+        JSON.SetString(s_args, "kind", "session_meta")
+        JSON.SetString(s_args, "scope", "persistent")
+        perr = Allocate(8)
+        StoreValue(perr, 0, "dword")
+        resp = IPCDispatch.Dispatch("Pgmem", s_args, 0, perr)
+        err = Dereference(perr, "dword")
+        Deallocate(perr, 8)
+
+        IfCondition Or(EqualTo(err, 1), EqualTo(resp, 0)) ThenBlock: {
+            UI.ChatPrintln("  [session] No saved sessions found in Pgmem.")
+            ReturnValue(0)
+        }
+
+        parsed = JSON.AsObject(ParseJSON(resp))
+        IfCondition EqualTo(parsed, 0) ThenBlock: {
+            UI.ChatPrintln("  [session] No saved sessions found in Pgmem.")
+            ReturnValue(0)
+        }
+
+        rows = JSON.GetArray(parsed, "rows")
+        IfCondition EqualTo(rows, 0) ThenBlock: {
+            UI.ChatPrintln("  [session] No saved sessions found in Pgmem.")
+            ReturnValue(0)
+        }
+
+        n_rows = JSON.ArrayLength(rows)
+        IfCondition LessEqual(n_rows, 0) ThenBlock: {
+            UI.ChatPrintln("  [session] No saved sessions found in Pgmem.")
+            ReturnValue(0)
+        }
+
+        UI.ChatPrintln("\n  Saved Sessions in Pgmem:")
+        i = 0
+        WhileLoop LessThan(i, n_rows) {
+            row_tag = JSON.ArrayGet(rows, i)
+            row = JSON.AsObject(row_tag)
+            IfCondition NotEqual(row, 0) ThenBlock: {
+                content_str = JSON.GetString(row, "content")
+                IfCondition NotEqual(content_str, 0) ThenBlock: {
+                    m_obj = JSON.AsObject(ParseJSON(content_str))
+                    IfCondition NotEqual(m_obj, 0) ThenBlock: {
+                        sid = JSON.GetString(m_obj, "id")
+                        title = JSON.GetString(m_obj, "title")
+                        model = JSON.GetString(m_obj, "model")
+                        turns = JSON.GetNumber(m_obj, "turns")
+                        IfCondition EqualTo(title, 0) ThenBlock: { title = "Untitled" }
+                        IfCondition EqualTo(model, 0) ThenBlock: { model = "Unknown" }
+
+                        msg = StringConcat("  ", NumberToString(Add(i, 1)))
+                        msg = StringConcat(msg, ". [")
+                        msg = StringConcat(msg, sid)
+                        msg = StringConcat(msg, "] ")
+                        msg = StringConcat(msg, title)
+                        msg = StringConcat(msg, " (")
+                        msg = StringConcat(msg, NumberToString(turns))
+                        msg = StringConcat(msg, " turns, ")
+                        msg = StringConcat(msg, model)
+                        msg = StringConcat(msg, ")")
+                        UI.ChatPrintln(msg)
+                    }
+                }
+            }
+            i = Add(i, 1)
+        }
+        UI.ChatPrintln("  Use /resume <session_id> to switch sessions.\n")
+    }
+}
+
 Function.CC_ChatLoop {
     Output: Integer
     Body: {
@@ -2232,6 +2827,7 @@ Function.CC_ChatLoop {
                 History.AppendUser(paste_buf)
                 paste_used = 0
                 CC_RunTurn()
+                CC_SaveSessionToPgmem()
                 ContinueLoop
             }
 
@@ -2245,6 +2841,134 @@ Function.CC_ChatLoop {
                 }
                 IfCondition EqualTo(StringCompare(line, "/help"), 0) ThenBlock: {
                     UI.PrintHelp()
+                }
+                IfCondition Or(EqualTo(StringCompare(line, "/models"), 0), EqualTo(StringCompare(line, "/refresh-models"), 0)) ThenBlock: {
+                    UI.ChatTag("→", "Querying provider APIs and updating model definitions...", 2)
+                    CC_RunModelScraper()
+                    UI.ChatTag("✓", "Models refreshed! Provider files in ~/.halcode/providers updated.", 2)
+                }
+                IfCondition EqualTo(StringCompare(line, "/sessions"), 0) ThenBlock: {
+                    CC_ListSessionsTUI()
+                }
+                IfCondition EqualTo(StringCompare(line, "/compact"), 0) ThenBlock: {
+                    UI.ChatTag("→", "Parking raw context snapshot to Pgmem & compacting active window...", 2)
+                    ok = CC_CompactSession()
+                    IfCondition EqualTo(ok, 1) ThenBlock: {
+                        UI.ChatTag("✓", "Context compacted! Raw snapshot saved in Pgmem.", 2)
+                    } ElseBlock: {
+                        UI.ChatTag("✗", "Compaction failed — active session ID missing.", 1)
+                    }
+                }
+                // /undo — pop the edit/write undo stack. Forms:
+                //   /undo        /undo N      /undo list     /undo status     /undo clear
+                undo_line_match = 0
+                undo_op = 0
+                undo_steps = 1
+                IfCondition EqualTo(StringCompare(line, "/undo"), 0) ThenBlock: {
+                    undo_op = "undo"
+                    undo_line_match = 1
+                }
+                IfCondition EqualTo(StringCompare(line, "/undo list"), 0) ThenBlock: {
+                    undo_op = "list"
+                    undo_line_match = 1
+                }
+                IfCondition EqualTo(StringCompare(line, "/undo status"), 0) ThenBlock: {
+                    undo_op = "status"
+                    undo_line_match = 1
+                }
+                IfCondition EqualTo(StringCompare(line, "/undo clear"), 0) ThenBlock: {
+                    undo_op = "clear"
+                    undo_line_match = 1
+                }
+                IfCondition And(EqualTo(undo_line_match, 0), GreaterThan(StringLength(line), 6)) ThenBlock: {
+                    undo_pfx = Allocate(7)
+                    undo_k = 0
+                    WhileLoop LessThan(undo_k, 6) {
+                        SetByte(undo_pfx, undo_k, GetByte(line, undo_k))
+                        undo_k = Add(undo_k, 1)
+                    }
+                    SetByte(undo_pfx, 6, 0)
+                    IfCondition EqualTo(StringCompare(undo_pfx, "/undo "), 0) ThenBlock: {
+                        undo_rest = Add(line, 6)
+                        undo_steps = StringToInt(undo_rest)
+                        IfCondition LessEqual(undo_steps, 0) ThenBlock: { undo_steps = 1 }
+                        undo_op = "undo"
+                        undo_line_match = 1
+                    }
+                    Deallocate(undo_pfx, 7)
+                }
+                IfCondition EqualTo(undo_line_match, 1) ThenBlock: {
+                    undo_args = JSON.NewObject()
+                    JSON.SetString(undo_args, "op", undo_op)
+                    IfCondition EqualTo(StringCompare(undo_op, "undo"), 0) ThenBlock: {
+                        JSON.SetNumber(undo_args, "steps", undo_steps)
+                    }
+                    undo_perr = Allocate(8)
+                    StoreValue(undo_perr, 0, "dword")
+                    undo_res = IPCDispatch.Dispatch("Undo", undo_args, "undo_cmd", undo_perr)
+                    undo_perr_val = Dereference(undo_perr, "dword")
+                    Deallocate(undo_perr, 8)
+                    IfCondition NotEqual(undo_res, 0) ThenBlock: {
+                        UI.ChatPrintln(undo_res)
+                    } ElseBlock: {
+                        UI.ChatTag("✗", "Undo tool execution failed.", 1)
+                    }
+                }
+                IfCondition EqualTo(StringCompare(line, "/new"), 0) ThenBlock: {
+                    CC_SaveSessionToPgmem()
+                    guid = CC_GenerateSessionGUID()
+                    History.SetSessionID(guid)
+                    History.SetTitle("New Session")
+                    History.Clear()
+                    CC_SaveSessionToPgmem()
+                    UI.ChatTag("✓", StringConcat("Started new session: ", guid), 2)
+                }
+                IfCondition GreaterThan(StringLength(line), 8) ThenBlock: {
+                    pfx8 = Allocate(9)
+                    k8 = 0
+                    WhileLoop LessThan(k8, 8) {
+                        SetByte(pfx8, k8, GetByte(line, k8))
+                        k8 = Add(k8, 1)
+                    }
+                    SetByte(pfx8, 8, 0)
+                    IfCondition EqualTo(StringCompare(pfx8, "/resume "), 0) ThenBlock: {
+                        target_sid = Add(line, 8)
+                        ok = CC_LoadSessionFromPgmem(target_sid)
+                        IfCondition EqualTo(ok, 1) ThenBlock: {
+                            UI.ChatTag("✓", StringConcat("Loaded session: ", target_sid), 2)
+                        } ElseBlock: {
+                            UI.ChatTag("✗", StringConcat("Session not found in Pgmem: ", target_sid), 1)
+                        }
+                    }
+                    Deallocate(pfx8, 9)
+                }
+                IfCondition GreaterThan(StringLength(line), 7) ThenBlock: {
+                    pfx7 = Allocate(8)
+                    k7 = 0
+                    WhileLoop LessThan(k7, 7) {
+                        SetByte(pfx7, k7, GetByte(line, k7))
+                        k7 = Add(k7, 1)
+                    }
+                    SetByte(pfx7, 7, 0)
+                    IfCondition EqualTo(StringCompare(pfx7, "/image "), 0) ThenBlock: {
+                        img_target = Add(line, 7)
+                        UI.ChatTag("→", StringConcat("Analyzing image via Vision tool: ", img_target), 2)
+                        v_args = JSON.NewObject()
+                        JSON.SetString(v_args, "path", img_target)
+                        perr = Allocate(8)
+                        StoreValue(perr, 0, "dword")
+                        v_res = IPCDispatch.Dispatch("Vision", v_args, "vision_cmd", perr)
+                        perr_val = Dereference(perr, "dword")
+                        Deallocate(perr, 8)
+                        IfCondition NotEqual(v_res, 0) ThenBlock: {
+                            UI.ChatPrintln(v_res)
+                        } ElseBlock: {
+                            err_msg = "Vision tool execution failed."
+                            IfCondition NotEqual(perr_val, 0) ThenBlock: { err_msg = perr_val }
+                            UI.ChatTag("✗", err_msg, 1)
+                        }
+                    }
+                    Deallocate(pfx7, 8)
                 }
                 IfCondition EqualTo(StringCompare(line, "/clear"), 0) ThenBlock: {
                     History.Init()
@@ -2518,6 +3242,7 @@ Function.CC_ChatLoop {
                         CC_SessionLogUser(line)
                         History.AppendUser(line)
                         CC_RunTurn()
+                        CC_SaveSessionToPgmem()
                     }
                 }
             }

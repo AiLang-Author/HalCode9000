@@ -35,6 +35,8 @@ FixedPool.HistState {
     "messages":      Initialize=0, CanChange=True
     "count":         Initialize=0, CanChange=True
     "initialized":   Initialize=0, CanChange=True
+    "session_id":    Initialize=0, CanChange=True
+    "title":         Initialize=0, CanChange=True
 }
 
 // =============================================================================
@@ -45,6 +47,8 @@ Function.History.Init {
         HistState.messages = JSON.NewArray()
         HistState.count = 0
         HistState.initialized = 1
+        HistState.session_id = 0
+        HistState.title = 0
     }
 }
 
@@ -247,5 +251,55 @@ Function.History.PopLast {
             }
             HistState.messages = new_arr
         }
+    }
+}
+
+Function.History.GetSessionID {
+    Output: Address
+    Body: { ReturnValue(HistState.session_id) }
+}
+
+Function.History.SetSessionID {
+    Input: id: Address
+    Body: { HistState.session_id = id }
+}
+
+Function.History.GetTitle {
+    Output: Address
+    Body: { ReturnValue(HistState.title) }
+}
+
+Function.History.SetTitle {
+    Input: title: Address
+    Body: { HistState.title = title }
+}
+
+Function.History.SerializeToJSON {
+    Output: Address
+    Body: {
+        IfCondition EqualTo(HistState.messages, 0) ThenBlock: { ReturnValue("[]") }
+        ReturnValue(JSON.SerializeArray(HistState.messages))
+    }
+}
+
+Function.History.LoadFromJSON {
+    Input: json_str: Address
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(json_str, 0) ThenBlock: { ReturnValue(0) }
+        parsed = ParseJSON(json_str)
+        IfCondition EqualTo(parsed, 0) ThenBlock: { ReturnValue(0) }
+        arr = JSON.AsArray(parsed)
+        IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(0) }
+        HistState.messages = arr
+        HistState.count = JSON.ArrayLength(arr)
+        ReturnValue(1)
+    }
+}
+
+Function.History.Clear {
+    Body: {
+        HistState.messages = JSON.NewArray()
+        HistState.count = 0
     }
 }

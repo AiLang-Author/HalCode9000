@@ -319,15 +319,25 @@ else
     fi
   }
 
-  echo -e "  ${BOLD}Primary providers:${RESET}"
-  prompt_key "HC_DEEPSEEK_KEY"   "DeepSeek API key"   "from platform.deepseek.com → API Keys"
-  prompt_key "HC_ANTHROPIC_KEY"  "Anthropic API key"  "from console.anthropic.com → API Keys"
-  echo ""
-  echo -e "  ${BOLD}Optional providers:${RESET}"
-  prompt_key "HC_OPENAI_KEY"     "OpenAI API key"     "from platform.openai.com → API Keys"
-  prompt_key "HC_XAI_KEY"        "xAI / Grok API key" "from console.x.ai → API Keys"
-  prompt_key "HC_GEMINI_KEY"     "Google Gemini key"  "from aistudio.google.com → Get API key"
-  prompt_key "HC_GROQ_KEY"       "Groq API key"       "from console.groq.com → API Keys"
+  # Run provider model aggregator to ensure provider JSON specs are fresh
+  if command -v python3 &>/dev/null && [[ -f "$SCRIPT_DIR/scripts/fetch_providers.py" ]]; then
+    info "Aggregating provider specifications..."
+    python3 "$SCRIPT_DIR/scripts/fetch_providers.py" >/dev/null 2>&1 || true
+  fi
+
+  echo -e "  ${BOLD}Configured providers:${RESET}"
+  
+  # Scan all provider JSON files for key_env requirements
+  for pjson in "$SCRIPT_DIR/providers"/*.json "$KEYSTORE_DIR/providers"/*.json; do
+    [[ -f "$pjson" ]] || continue
+    P_NAME=$(grep -o '"name": *"[^"]*"' "$pjson" | head -n1 | cut -d'"' -f4 || true)
+    P_ENV=$(grep -o '"key_env": *"[^"]*"' "$pjson" | head -n1 | cut -d'"' -f4 || true)
+    [[ -z "$P_NAME" || -z "$P_ENV" ]] && continue
+    
+    # Map key_env to HC_ prefix if needed or store environment key directly
+    HC_VAR="HC_${P_ENV}"
+    prompt_key "$HC_VAR" "${P_NAME} API key (${P_ENV})" "from ${P_NAME} portal"
+  done
 fi
 
 echo ""

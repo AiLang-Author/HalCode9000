@@ -1811,6 +1811,7 @@ Function.UI_GetTimeMs {
 
 Function.UI.AnimTick {
     Body: {
+        IfCondition EqualTo(UILayout.initialized, 0) ThenBlock: { ReturnValue(0) }
         UI.PumpInput()
         
         ms = UI_GetTimeMs()
@@ -2626,8 +2627,14 @@ Function.UI.PrintHelp {
         UI.ChatPrintln("  /thread <name>     set active thread slug (shown as proj/thread)")
         UI.ChatPrintln("  /model             show current model")
         UI.ChatPrintln("  /model <name>      switch model (e.g. deepseek-v4-flash)")
+        UI.ChatPrintln("  /models            refresh live provider model lists from APIs")
         UI.ChatPrintln("  /reasoning         show reasoning budget")
         UI.ChatPrintln("  /reasoning <lvl>   set budget: off | min | medium | max")
+        UI.ChatPrintln("  /sessions          list saved pgmem sessions")
+        UI.ChatPrintln("  /resume <id>       load a saved session from pgmem")
+        UI.ChatPrintln("  /new [title]       save current session and start a new clean session")
+        UI.ChatPrintln("  /compact           park snapshot to pgmem & condense active token window")
+        UI.ChatPrintln("  /image <path|url>  analyze image file or URL via Vision tool")
         UI.ChatPrintln("  /clear             reset conversation history")
         UI.ChatPrintln("  /logout            clear saved OAuth credentials")
         UI.ChatPrintln("  /quit              exit")

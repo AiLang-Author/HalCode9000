@@ -42,6 +42,169 @@ FixedPool.CCEditState {
     "replace_len": Initialize=0, CanChange=True
 }
 
+FixedPool.CCEditUndo {
+    "JOURNAL_DIR": Initialize=0, CanChange=True
+}
+
+// =============================================================================
+// UNDO JOURNAL (record before-image before modifying a file)
+// =============================================================================
+
+// Read $HOME from /proc/self/environ. Returns 0 if not set.
+Function.CCEdit_UndoGetHome {
+    Output: Address
+    Body: {
+        fd = SystemCall(CCEditSys.SYS_OPEN, "/proc/self/environ", 0, 0, 0, 0)
+        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
+        buf = Allocate(8192)
+        n = SystemCall(CCEditSys.SYS_READ, fd, buf, 8192, 0, 0)
+        SystemCall(CCEditSys.SYS_CLOSE, fd, 0, 0, 0, 0)
+        IfCondition LessEqual(n, 0) ThenBlock: {
+            Deallocate(buf, 8192)
+            ReturnValue(0)
+        }
+        i = 0
+        WhileLoop LessThan(i, n) {
+            IfCondition EqualTo(GetByte(buf, i), 72) ThenBlock: {
+                IfCondition EqualTo(GetByte(buf, Add(i, 1)), 79) ThenBlock: {
+                    IfCondition EqualTo(GetByte(buf, Add(i, 2)), 77) ThenBlock: {
+                        IfCondition EqualTo(GetByte(buf, Add(i, 3)), 69) ThenBlock: {
+                            IfCondition EqualTo(GetByte(buf, Add(i, 4)), 61) ThenBlock: {
+                                val_start = Add(i, 5)
+                                val_end = val_start
+                                WhileLoop LessThan(val_end, n) {
+                                    IfCondition EqualTo(GetByte(buf, val_end), 0) ThenBlock: { BreakLoop }
+                                    val_end = Add(val_end, 1)
+                                }
+                                val_len = Subtract(val_end, val_start)
+                                out = Allocate(Add(val_len, 1))
+                                k = 0
+                                WhileLoop LessThan(k, val_len) {
+                                    SetByte(out, k, GetByte(buf, Add(val_start, k)))
+                                    k = Add(k, 1)
+                                }
+                                SetByte(out, val_len, 0)
+                                Deallocate(buf, 8192)
+                                ReturnValue(out)
+                            }
+                        }
+                    }
+                }
+            }
+            WhileLoop LessThan(i, n) {
+                IfCondition EqualTo(GetByte(buf, i), 0) ThenBlock: { BreakLoop }
+                i = Add(i, 1)
+            }
+            i = Add(i, 1)
+        }
+        Deallocate(buf, 8192)
+        ReturnValue(0)
+    }
+}
+
+Function.CCEdit_UndoEnsureDir {
+    Body: {
+        IfCondition NotEqual(CCEditUndo.JOURNAL_DIR, 0) ThenBlock: { ReturnValue(0) }
+        home = CCEdit_UndoGetHome()
+        IfCondition EqualTo(home, 0) ThenBlock: { home = "/root" }
+        CCEditUndo.JOURNAL_DIR = StringConcat(home, "/.halcode/undo")
+        SystemCall(CCEditSys.SYS_MKDIR, CCEditUndo.JOURNAL_DIR, 493, 0, 0, 0)
+    }
+}
+
+Function.CCEdit_UndoHeadPath {
+    Output: Address
+    Body: {
+        CCEdit_UndoEnsureDir()
+        ReturnValue(StringConcat(CCEditUndo.JOURNAL_DIR, "/HEAD"))
+    }
+}
+
+Function.CCEdit_UndoEntryPath {
+    Input: seq: Integer
+    Input: suffix: Address
+    Output: Address
+    Body: {
+        CCEdit_UndoEnsureDir()
+        num = NumberToString(seq)
+        p = StringConcat(CCEditUndo.JOURNAL_DIR, "/")
+        p = StringConcat(p, num)
+        p = StringConcat(p, suffix)
+        ReturnValue(p)
+    }
+}
+
+Function.CCEdit_UndoReadHead {
+    Output: Integer
+    Body: {
+        path = CCEdit_UndoHeadPath()
+        fd = SystemCall(CCEditSys.SYS_OPEN, path, 0, 0, 0, 0)
+        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
+        buf = Allocate(32)
+        n = SystemCall(CCEditSys.SYS_READ, fd, buf, 31, 0, 0)
+        SystemCall(CCEditSys.SYS_CLOSE, fd, 0, 0, 0, 0)
+        IfCondition LessEqual(n, 0) ThenBlock: {
+            Deallocate(buf, 32)
+            ReturnValue(0)
+        }
+        SetByte(buf, n, 0)
+        val = StringToInt(buf)
+        Deallocate(buf, 32)
+        ReturnValue(val)
+    }
+}
+
+Function.CCEdit_UndoWriteHead {
+    Input: val: Integer
+    Body: {
+        path = CCEdit_UndoHeadPath()
+        str = NumberToString(val)
+        fd = SystemCall(CCEditSys.SYS_OPEN, path, 577, 420, 0, 0)
+        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
+        written = 0
+        slen = StringLength(str)
+        WhileLoop LessThan(written, slen) {
+            n = SystemCall(CCEditSys.SYS_WRITE, fd, Add(str, written), Subtract(slen, written), 0, 0)
+            IfCondition LessEqual(n, 0) ThenBlock: { BreakLoop }
+            written = Add(written, n)
+        }
+        SystemCall(CCEditSys.SYS_CLOSE, fd, 0, 0, 0, 0)
+    }
+}
+
+Function.CCEdit_UndoWriteFile {
+    Input: path: Address
+    Input: data: Address
+    Input: len: Integer
+    Body: {
+        fd = SystemCall(CCEditSys.SYS_OPEN, path, 577, 420, 0, 0)
+        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
+        written = 0
+        WhileLoop LessThan(written, len) {
+            n = SystemCall(CCEditSys.SYS_WRITE, fd, Add(data, written), Subtract(len, written), 0, 0)
+            IfCondition LessEqual(n, 0) ThenBlock: { BreakLoop }
+            written = Add(written, n)
+        }
+        SystemCall(CCEditSys.SYS_CLOSE, fd, 0, 0, 0, 0)
+    }
+}
+
+Function.CCEdit_RecordUndo {
+    Input: path: Address
+    Input: before_buf: Address
+    Input: before_len: Integer
+    Body: {
+        CCEdit_UndoEnsureDir()
+        head = CCEdit_UndoReadHead()
+        seq = Add(head, 1)
+        ppath = CCEdit_UndoEntryPath(seq, ".path")
+        CCEdit_UndoWriteFile(ppath, path, StringLength(path))
+        bpath = CCEdit_UndoEntryPath(seq, ".bak")
+        CCEdit_UndoWriteFile(bpath, before_buf, before_len)
+        CCEdit_UndoWriteHead(seq)
+    }
+}
+
 // =============================================================================
 // SCHEMA
 // =============================================================================
@@ -257,6 +420,9 @@ Function.CCEdit_DoEdit {
             MemoryCopy(err_buf, msg, Add(StringLength(msg), 1))
             ReturnValue(0)
         }
+
+        // Record before-image so /undo can restore the original content.
+        CCEdit_RecordUndo(path, file_buf, total)
 
         // --- Write back: O_WRONLY|O_CREAT|O_TRUNC=577, 0644=420 ---
         wfd = SystemCall(CCEditSys.SYS_OPEN, path, 577, 420, 0, 0)

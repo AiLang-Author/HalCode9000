@@ -18,9 +18,11 @@ LibraryImport.StringUtils
 LibraryImport.UtilArgs
 
 FixedPool.CCWriteSys {
+    "SYS_READ":      Initialize=0
     "SYS_WRITE":     Initialize=1
     "SYS_OPEN":      Initialize=2
     "SYS_CLOSE":     Initialize=3
+    "SYS_FSTAT":     Initialize=5
     "SYS_MKDIR":     Initialize=83
     "SYS_UNLINK":    Initialize=87
 }
@@ -43,6 +45,225 @@ FixedPool.CCWriteState {
     "schema":        Initialize=0, CanChange=True
     "listen_fd":     Initialize=-1, CanChange=True
     "running":       Initialize=1, CanChange=True
+    "bak_len":       Initialize=0, CanChange=True
+}
+
+FixedPool.CCWriteUndo {
+    "JOURNAL_DIR": Initialize=0, CanChange=True
+    "MAX_FILE":    Initialize=4194304
+}
+
+// =============================================================================
+// UNDO JOURNAL (record before-image before modifying a file)
+// =============================================================================
+
+// Read $HOME from /proc/self/environ. Returns 0 if not set.
+Function.CCWrite_UndoGetHome {
+    Output: Address
+    Body: {
+        fd = SystemCall(CCWriteSys.SYS_OPEN, "/proc/self/environ", 0, 0, 0, 0)
+        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
+        buf = Allocate(8192)
+        n = SystemCall(CCWriteSys.SYS_READ, fd, buf, 8192, 0, 0)
+        SystemCall(CCWriteSys.SYS_CLOSE, fd, 0, 0, 0, 0)
+        IfCondition LessEqual(n, 0) ThenBlock: {
+            Deallocate(buf, 8192)
+            ReturnValue(0)
+        }
+        i = 0
+        WhileLoop LessThan(i, n) {
+            IfCondition EqualTo(GetByte(buf, i), 72) ThenBlock: {
+                IfCondition EqualTo(GetByte(buf, Add(i, 1)), 79) ThenBlock: {
+                    IfCondition EqualTo(GetByte(buf, Add(i, 2)), 77) ThenBlock: {
+                        IfCondition EqualTo(GetByte(buf, Add(i, 3)), 69) ThenBlock: {
+                            IfCondition EqualTo(GetByte(buf, Add(i, 4)), 61) ThenBlock: {
+                                val_start = Add(i, 5)
+                                val_end = val_start
+                                WhileLoop LessThan(val_end, n) {
+                                    IfCondition EqualTo(GetByte(buf, val_end), 0) ThenBlock: { BreakLoop }
+                                    val_end = Add(val_end, 1)
+                                }
+                                val_len = Subtract(val_end, val_start)
+                                out = Allocate(Add(val_len, 1))
+                                k = 0
+                                WhileLoop LessThan(k, val_len) {
+                                    SetByte(out, k, GetByte(buf, Add(val_start, k)))
+                                    k = Add(k, 1)
+                                }
+                                SetByte(out, val_len, 0)
+                                Deallocate(buf, 8192)
+                                ReturnValue(out)
+                            }
+                        }
+                    }
+                }
+            }
+            WhileLoop LessThan(i, n) {
+                IfCondition EqualTo(GetByte(buf, i), 0) ThenBlock: { BreakLoop }
+                i = Add(i, 1)
+            }
+            i = Add(i, 1)
+        }
+        Deallocate(buf, 8192)
+        ReturnValue(0)
+    }
+}
+
+Function.CCWrite_UndoEnsureDir {
+    Body: {
+        IfCondition NotEqual(CCWriteUndo.JOURNAL_DIR, 0) ThenBlock: { ReturnValue(0) }
+        home = CCWrite_UndoGetHome()
+        IfCondition EqualTo(home, 0) ThenBlock: { home = "/root" }
+        CCWriteUndo.JOURNAL_DIR = StringConcat(home, "/.halcode/undo")
+        SystemCall(CCWriteSys.SYS_MKDIR, CCWriteUndo.JOURNAL_DIR, 493, 0, 0, 0)
+    }
+}
+
+Function.CCWrite_UndoHeadPath {
+    Output: Address
+    Body: {
+        CCWrite_UndoEnsureDir()
+        ReturnValue(StringConcat(CCWriteUndo.JOURNAL_DIR, "/HEAD"))
+    }
+}
+
+Function.CCWrite_UndoEntryPath {
+    Input: seq: Integer
+    Input: suffix: Address
+    Output: Address
+    Body: {
+        CCWrite_UndoEnsureDir()
+        num = NumberToString(seq)
+        p = StringConcat(CCWriteUndo.JOURNAL_DIR, "/")
+        p = StringConcat(p, num)
+        p = StringConcat(p, suffix)
+        ReturnValue(p)
+    }
+}
+
+Function.CCWrite_UndoReadHead {
+    Output: Integer
+    Body: {
+        path = CCWrite_UndoHeadPath()
+        fd = SystemCall(CCWriteSys.SYS_OPEN, path, 0, 0, 0, 0)
+        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
+        buf = Allocate(32)
+        n = SystemCall(CCWriteSys.SYS_READ, fd, buf, 31, 0, 0)
+        SystemCall(CCWriteSys.SYS_CLOSE, fd, 0, 0, 0, 0)
+        IfCondition LessEqual(n, 0) ThenBlock: {
+            Deallocate(buf, 32)
+            ReturnValue(0)
+        }
+        SetByte(buf, n, 0)
+        val = StringToInt(buf)
+        Deallocate(buf, 32)
+        ReturnValue(val)
+    }
+}
+
+Function.CCWrite_UndoWriteHead {
+    Input: val: Integer
+    Body: {
+        path = CCWrite_UndoHeadPath()
+        str = NumberToString(val)
+        fd = SystemCall(CCWriteSys.SYS_OPEN, path, 577, 420, 0, 0)
+        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
+        written = 0
+        slen = StringLength(str)
+        WhileLoop LessThan(written, slen) {
+            n = SystemCall(CCWriteSys.SYS_WRITE, fd, Add(str, written), Subtract(slen, written), 0, 0)
+            IfCondition LessEqual(n, 0) ThenBlock: { BreakLoop }
+            written = Add(written, n)
+        }
+        SystemCall(CCWriteSys.SYS_CLOSE, fd, 0, 0, 0, 0)
+    }
+}
+
+Function.CCWrite_UndoWriteFile {
+    Input: path: Address
+    Input: data: Address
+    Input: len: Integer
+    Body: {
+        fd = SystemCall(CCWriteSys.SYS_OPEN, path, 577, 420, 0, 0)
+        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
+        written = 0
+        WhileLoop LessThan(written, len) {
+            n = SystemCall(CCWriteSys.SYS_WRITE, fd, Add(data, written), Subtract(len, written), 0, 0)
+            IfCondition LessEqual(n, 0) ThenBlock: { BreakLoop }
+            written = Add(written, n)
+        }
+        SystemCall(CCWriteSys.SYS_CLOSE, fd, 0, 0, 0, 0)
+    }
+}
+
+// Return 1 if the file exists (openable), else 0.
+Function.CCWrite_FileExists {
+    Input: path: Address
+    Output: Integer
+    Body: {
+        fd = SystemCall(CCWriteSys.SYS_OPEN, path, 0, 0, 0, 0)
+        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
+        SystemCall(CCWriteSys.SYS_CLOSE, fd, 0, 0, 0, 0)
+        ReturnValue(1)
+    }
+}
+
+// Read an entire file into a heap buffer. Returns 0 if unreadable or too large.
+// Stores the byte count in CCWriteState.bak_len.
+Function.CCWrite_ReadFile {
+    Input: path: Address
+    Output: Address
+    Body: {
+        fd = SystemCall(CCWriteSys.SYS_OPEN, path, 0, 0, 0, 0)
+        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
+        stat_buf = Allocate(144)
+        SystemCall(CCWriteSys.SYS_FSTAT, fd, stat_buf, 0, 0, 0)
+        size = Dereference(Add(stat_buf, 48))
+        Deallocate(stat_buf, 144)
+        IfCondition GreaterThan(size, CCWriteUndo.MAX_FILE) ThenBlock: {
+            SystemCall(CCWriteSys.SYS_CLOSE, fd, 0, 0, 0, 0)
+            ReturnValue(0)
+        }
+        buf = Allocate(Add(size, 2))
+        total = 0
+        WhileLoop LessThan(total, size) {
+            n = SystemCall(CCWriteSys.SYS_READ, fd, Add(buf, total), Subtract(size, total), 0, 0)
+            IfCondition LessEqual(n, 0) ThenBlock: { BreakLoop }
+            total = Add(total, n)
+        }
+        SetByte(buf, total, 0)
+        SystemCall(CCWriteSys.SYS_CLOSE, fd, 0, 0, 0, 0)
+        CCWriteState.bak_len = total
+        ReturnValue(buf)
+    }
+}
+
+// Record a before-image so /undo can restore the original content.
+Function.CCWrite_RecordUndo {
+    Input: path: Address
+    Body: {
+        CCWrite_UndoEnsureDir()
+        existed = CCWrite_FileExists(path)
+        before = 0
+        before_len = 0
+        IfCondition EqualTo(existed, 1) ThenBlock: {
+            before = CCWrite_ReadFile(path)
+            IfCondition EqualTo(before, 0) ThenBlock: { ReturnValue(0) }
+            before_len = CCWriteState.bak_len
+        }
+        head = CCWrite_UndoReadHead()
+        seq = Add(head, 1)
+        ppath = CCWrite_UndoEntryPath(seq, ".path")
+        CCWrite_UndoWriteFile(ppath, path, StringLength(path))
+        IfCondition EqualTo(existed, 1) ThenBlock: {
+            bpath = CCWrite_UndoEntryPath(seq, ".bak")
+            CCWrite_UndoWriteFile(bpath, before, before_len)
+        } ElseBlock: {
+            npath = CCWrite_UndoEntryPath(seq, ".new")
+            CCWrite_UndoWriteFile(npath, "", 0)
+        }
+        CCWrite_UndoWriteHead(seq)
+    }
 }
 
 Function.CCWrite_BuildSchema {
@@ -171,6 +392,9 @@ Function.CCWrite_Do {
         // Auto-create the parent directory — common cause of "open failed" when
         // writing to a new subdirectory the model hasn't created yet.
         CCWrite_MkdirParent(path)
+
+        // Record before-image BEFORE O_TRUNC destroys the existing content.
+        CCWrite_RecordUndo(path)
 
         flags = BitwiseOr(CCWriteFlags.O_WRONLY, CCWriteFlags.O_CREAT)
         IfCondition EqualTo(append, 1) ThenBlock: {

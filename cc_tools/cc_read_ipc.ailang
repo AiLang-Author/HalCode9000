@@ -69,6 +69,50 @@ Function.CCRead_BuildSchema {
     }
 }
 
+Function.CCRead_EndsWith {
+    Input: str: Address
+    Input: suffix: Address
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(str, 0) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(suffix, 0) ThenBlock: { ReturnValue(0) }
+        len_str = StringLength(str)
+        len_suf = StringLength(suffix)
+        IfCondition LessThan(len_str, len_suf) ThenBlock: { ReturnValue(0) }
+
+        i = 0
+        WhileLoop LessThan(i, len_suf) {
+            c1 = GetByte(str, Add(Subtract(len_str, len_suf), i))
+            c2 = GetByte(suffix, i)
+            IfCondition GreaterEqual(c1, 65) ThenBlock: {
+                IfCondition LessEqual(c1, 90) ThenBlock: { c1 = Add(c1, 32) }
+            }
+            IfCondition GreaterEqual(c2, 65) ThenBlock: {
+                IfCondition LessEqual(c2, 90) ThenBlock: { c2 = Add(c2, 32) }
+            }
+            IfCondition NotEqual(c1, c2) ThenBlock: { ReturnValue(0) }
+            i = Add(i, 1)
+        }
+        ReturnValue(1)
+    }
+}
+
+Function.CCRead_IsImageFile {
+    Input: path: Address
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(CCRead_EndsWith(path, ".png"), 1) ThenBlock: { ReturnValue(1) }
+        IfCondition EqualTo(CCRead_EndsWith(path, ".jpg"), 1) ThenBlock: { ReturnValue(1) }
+        IfCondition EqualTo(CCRead_EndsWith(path, ".jpeg"), 1) ThenBlock: { ReturnValue(1) }
+        IfCondition EqualTo(CCRead_EndsWith(path, ".gif"), 1) ThenBlock: { ReturnValue(1) }
+        IfCondition EqualTo(CCRead_EndsWith(path, ".webp"), 1) ThenBlock: { ReturnValue(1) }
+        IfCondition EqualTo(CCRead_EndsWith(path, ".svg"), 1) ThenBlock: { ReturnValue(1) }
+        IfCondition EqualTo(CCRead_EndsWith(path, ".bmp"), 1) ThenBlock: { ReturnValue(1) }
+        IfCondition EqualTo(CCRead_EndsWith(path, ".ico"), 1) ThenBlock: { ReturnValue(1) }
+        ReturnValue(0)
+    }
+}
+
 // =============================================================================
 // CORE READ — given validated args, return result string (caller frees)
 // Sets out_truncated_ptr to 1 if response was truncated.
@@ -95,6 +139,12 @@ Function.CCRead_DoRead {
             }
             SetByte(err_buf, StringLength(err_msg), 0)
             ReturnValue(0)
+        }
+
+        IfCondition EqualTo(CCRead_IsImageFile(path), 1) ThenBlock: {
+            card = StringConcat("[IMAGE FILE DETECTED]\nFile: ", path)
+            card = StringConcat(card, "\nNotice: Reading raw binary/image data as text is restricted to prevent console corruption.\nAction: Use the Vision tool or '/image <path>' command to inspect this image.")
+            ReturnValue(card)
         }
 
         fd = SystemCall(CCReadSys.SYS_OPEN, path, 0, 0, 0, 0)

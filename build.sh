@@ -52,6 +52,11 @@ if [[ -z "$AILANG" ]]; then
     exit 1
 fi
 
+# The AILang tree root is where local imports (Applications.<App>.*,
+# Packager.Packager.*) resolve. Derive it from the compiler's real location.
+AILANG_ROOT="$(cd "$(dirname "$(readlink -f "$AILANG")")" && pwd)"
+cd "$AILANG_ROOT"
+
 # Tool list: bare names, expanded both for source and binary
 TOOLS=(read head ls write bash webfetch edit find grep git)
 
@@ -124,7 +129,7 @@ build_app() {
                   "${tmp_prefix}_cc_mcp_ipc"
         local_tools+=(mcp)
     fi
-    for _opt in stat wc du diff olympus sleep skills ailang ailang_lsp packager; do
+    for _opt in stat wc du diff olympus sleep skills ailang ailang_lsp packager vision undo; do
         if [[ -f "${tools_dir}/cc_${_opt}_ipc.ailang" ]]; then
             build_one "${tools_dir}/cc_${_opt}_ipc.ailang" \
                       "/tmp/${tmp_prefix}_cc_${_opt}_ipc.x" \

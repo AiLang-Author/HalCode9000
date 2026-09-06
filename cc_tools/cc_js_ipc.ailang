@@ -120,8 +120,12 @@ Function.CCJs_HandleRequest {
                 IfCondition GreaterThan(parsed_steps, 0) ThenBlock: { step_limit = parsed_steps }
             }
             JSVM_SetMaxSteps(step_limit)
-            
+
             // Execute native JavaScript on the AILang VM
+            // NOTE: JSEngine_Run resets Lex/Comp/VM but not JSRT.
+            // Without this, val_pool and str_slab accumulate across
+            // requests until they wrap and corrupt live pointers → SIGSEGV.
+            JSRT_Reset()
             code_len = StringLength(js_code)
             js_val = JSEngine_EvalString(js_code, code_len)
 

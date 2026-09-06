@@ -3,12 +3,28 @@
   "backend": "anthropic",
   "base_url": "https://api.anthropic.com",
   "api_path": "/v1/messages",
+  "models_endpoint": "/v1/models",
   "auth": "x-api-key",
+  "key_env": "ANTHROPIC_API_KEY",
+  "key_hint": "anthropic",
   "tier": 1,
   "models": [
-    { "id": "claude-opus-4-7",       "display": "Claude Opus 4.7",   "input_per_1m": 15.00, "output_per_1m": 75.00 },
-    { "id": "claude-sonnet-4-6",     "display": "Claude Sonnet 4.6", "input_per_1m":  3.00, "output_per_1m": 15.00 },
-    { "id": "claude-haiku-4-5-20251001", "display": "Claude Haiku 4.5", "input_per_1m": 0.80, "output_per_1m":  4.00 }
+    {
+      "id": "claude-3-7-sonnet-20250219",
+      "display": "Claude 3.7 Sonnet"
+    },
+    {
+      "id": "claude-3-5-sonnet-20241022",
+      "display": "Claude 3.5 Sonnet"
+    },
+    {
+      "id": "claude-3-5-haiku-20241022",
+      "display": "Claude 3.5 Haiku"
+    },
+    {
+      "id": "claude-3-opus-20240229",
+      "display": "Claude 3 Opus"
+    }
   ],
-  "default_model": "claude-sonnet-4-6"
+  "default_model": "claude-3-7-sonnet-20250219"
 }
