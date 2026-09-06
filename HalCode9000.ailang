@@ -25,6 +25,7 @@ LibraryImport.HTTP
 LibraryImport.SSE
 LibraryImport.OAuth
 LibraryImport.ANSICanvas
+LibraryImport.ThreadTrampoline
 Import.Applications.HalCode9000.History
 Import.Applications.HalCode9000.UI
 Import.Applications.HalCode9000.IPCDispatch
@@ -3580,6 +3581,14 @@ Function.CC_RunAgentMode {
         CC_AgentLog("[worker] appending prompt to history")
         History.AppendUser(prompt)
 
+        CC_AgentLog("[worker] CCFan init")
+        fan_ok = CCFan_Init()
+        fan_sum = 0
+        IfCondition EqualTo(fan_ok, 1) ThenBlock: {
+            fan_sum = CCFan_SelfTest()
+        }
+        CC_AgentLog(StringConcat("[worker] CCFan self-test sum=", NumberToString(fan_sum)))
+
         // Agentic loop: keep calling CC_RunTurn as long as the model requests
         // tools. After each turn, if the last history entry is a "user" role
         // block (i.e. tool results were just appended), the model needs another
@@ -3618,6 +3627,9 @@ Function.CC_RunAgentMode {
             CC_AgentLog("[worker] WARNING: hit max turn cap (25) — stopping")
         }
 
+        CC_AgentLog("[worker] CCFan shutdown")
+        CCFan_Shutdown()
+
         UI.Shutdown()
 
         // Restore stdout before writing result
@@ -3652,6 +3664,207 @@ Function.CC_RunAgentMode {
         CC_WriteStdout(result)
         CC_WriteStdout("\n")
         CC_AgentLog("[worker] done")
+    }
+}
+
+// =============================================================================
+// PARALLEL FAN-OUT POOL — Phase 1: safe leaf ops for the --agent worker.
+// Persistent worker pool built on Library.ThreadTrampoline (clone + futex,
+// own 4MB mmap heap, no Arena). Workers run read-only leaf ops (StringLength,
+// Dereference/StoreValue on pre-allocated slots) in parallel.
+//
+// RULES (see test_threading.ailang):
+//   - Workers must NOT touch the Arena allocator: no Allocate/Deallocate,
+//     no PrintMessage/PrintNumber, no StringConcat/NumberToString.
+//   - All shared mutable state is one mutex-protected job cursor.
+//   - Input strings must stay alive until the batch completes.
+//
+// Layout (heap blocks allocated by the main thread before any spawn):
+//   jobs    = array of max_jobs Address (8 bytes each)
+//   results = array of max_jobs Integer (8 bytes each)
+//   tids    = array of worker_count Integer (8 bytes each)
+// =============================================================================
+
+FixedPool.CCFanState {
+    "worker_count":  Initialize=7, CanChange=True
+    "max_jobs":      Initialize=64, CanChange=True
+    "jobs":          Initialize=0, CanChange=True
+    "results":       Initialize=0, CanChange=True
+    "tids":          Initialize=0, CanChange=True
+    "job_count":     Initialize=0, CanChange=True
+    "next_job":      Initialize=0, CanChange=True
+    "completed":     Initialize=0, CanChange=True
+    "head_mutex":    Initialize=0, CanChange=True
+    "active":        Initialize=1, CanChange=True
+    "selftest_sum":  Initialize=0, CanChange=True
+}
+
+// Worker entry point. cookie = worker index (kept for CallIndirect signature).
+Function.CCFan_WorkerEntry {
+    Input: cookie: Integer
+    Output: Integer
+    Body: {
+        m = CCFanState.head_mutex
+        WhileLoop EqualTo(1, 1) {
+            my_job = -1
+            Mutex_Lock(m)
+            IfCondition LessThan(CCFanState.next_job, CCFanState.job_count) ThenBlock: {
+                my_job = CCFanState.next_job
+                CCFanState.next_job = Add(my_job, 1)
+            }
+            Mutex_Unlock(m)
+
+            IfCondition GreaterEqual(my_job, 0) ThenBlock: {
+                s = Dereference(Add(CCFanState.jobs, Multiply(my_job, 8)))
+                slen = StringLength(s)
+                StoreValue(Add(CCFanState.results, Multiply(my_job, 8)), slen)
+                Mutex_Lock(m)
+                CCFanState.completed = Add(CCFanState.completed, 1)
+                Mutex_Unlock(m)
+            } ElseBlock: {
+                IfCondition EqualTo(CCFanState.active, 0) ThenBlock: {
+                    ReturnValue(0)
+                }
+                Thread_Sleep(1)
+            }
+        }
+        ReturnValue(0)
+    }
+}
+
+// Spin up the persistent pool. Returns 1 on success, 0 on failure.
+Function.CCFan_Init {
+    Output: Integer
+    Body: {
+        Thread_Init()
+
+        CCFanState.jobs = Allocate(Multiply(CCFanState.max_jobs, 8))
+        CCFanState.results = Allocate(Multiply(CCFanState.max_jobs, 8))
+        CCFanState.tids = Allocate(Multiply(CCFanState.worker_count, 8))
+        CCFanState.head_mutex = Mutex_Create()
+
+        IfCondition EqualTo(CCFanState.jobs, 0) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(CCFanState.results, 0) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(CCFanState.tids, 0) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(CCFanState.head_mutex, 0) ThenBlock: { ReturnValue(0) }
+
+        CCFanState.active = 1
+        CCFanState.job_count = 0
+        CCFanState.next_job = 0
+        CCFanState.completed = 0
+
+        i = 0
+        WhileLoop LessThan(i, CCFanState.worker_count) {
+            tid = Thread_Spawn(AddressOf(CCFan_WorkerEntry), i)
+            IfCondition EqualTo(tid, 0) ThenBlock: {
+                CCFanState.active = 0
+                ReturnValue(0)
+            }
+            StoreValue(Add(CCFanState.tids, Multiply(i, 8)), tid)
+            i = Add(i, 1)
+        }
+        ReturnValue(1)
+    }
+}
+
+// Run a batch of N string pointers in parallel; write each StringLength into
+// out (N Integers). Blocks until complete. Returns 1 on success.
+Function.CCFan_RunBatch {
+    Input: strs: Address
+    Input: count: Integer
+    Input: out: Address
+    Output: Integer
+    Body: {
+        IfCondition GreaterThan(count, CCFanState.max_jobs) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(CCFanState.active, 0) ThenBlock: { ReturnValue(0) }
+
+        i = 0
+        WhileLoop LessThan(i, count) {
+            s = Dereference(Add(strs, Multiply(i, 8)))
+            StoreValue(Add(CCFanState.jobs, Multiply(i, 8)), s)
+            i = Add(i, 1)
+        }
+
+        CCFanState.job_count = count
+        CCFanState.next_job = 0
+        CCFanState.completed = 0
+
+        WhileLoop LessThan(CCFanState.completed, count) {
+            CC_SleepMs(1)
+        }
+
+        i = 0
+        WhileLoop LessThan(i, count) {
+            r = Dereference(Add(CCFanState.results, Multiply(i, 8)))
+            StoreValue(Add(out, Multiply(i, 8)), r)
+            i = Add(i, 1)
+        }
+        ReturnValue(1)
+    }
+}
+
+// Tear down the pool: signal shutdown, join workers, free heap blocks.
+Function.CCFan_Shutdown {
+    Body: {
+        CCFanState.active = 0
+        i = 0
+        WhileLoop LessThan(i, CCFanState.worker_count) {
+            tid = Dereference(Add(CCFanState.tids, Multiply(i, 8)))
+            IfCondition NotEqual(tid, 0) ThenBlock: {
+                Thread_Join(tid)
+            }
+            i = Add(i, 1)
+        }
+        IfCondition NotEqual(CCFanState.head_mutex, 0) ThenBlock: {
+            Mutex_Destroy(CCFanState.head_mutex)
+        }
+        IfCondition NotEqual(CCFanState.jobs, 0) ThenBlock: {
+            Deallocate(CCFanState.jobs, Multiply(CCFanState.max_jobs, 8))
+        }
+        IfCondition NotEqual(CCFanState.results, 0) ThenBlock: {
+            Deallocate(CCFanState.results, Multiply(CCFanState.max_jobs, 8))
+        }
+        IfCondition NotEqual(CCFanState.tids, 0) ThenBlock: {
+            Deallocate(CCFanState.tids, Multiply(CCFanState.worker_count, 8))
+        }
+        CCFanState.head_mutex = 0
+        CCFanState.jobs = 0
+        CCFanState.results = 0
+        CCFanState.tids = 0
+    }
+}
+
+// Self-test: 4 strings ("abcd","abcdefgh","abcdefghijkl","abcd") through the
+// pool; expected length sum = 4+8+12+4 = 28. Returns the computed sum.
+Function.CCFan_SelfTest {
+    Output: Integer
+    Body: {
+        strs = Allocate(Multiply(4, 8))
+        s0 = "abcd"
+        s1 = "abcdefgh"
+        s2 = "abcdefghijkl"
+        s3 = "abcd"
+        StoreValue(Add(strs, 0), s0)
+        StoreValue(Add(strs, 8), s1)
+        StoreValue(Add(strs, 16), s2)
+        StoreValue(Add(strs, 24), s3)
+
+        out = Allocate(Multiply(4, 8))
+        ok = CCFan_RunBatch(strs, 4, out)
+
+        sum = 0
+        IfCondition EqualTo(ok, 1) ThenBlock: {
+            i = 0
+            WhileLoop LessThan(i, 4) {
+                sum = Add(sum, Dereference(Add(out, Multiply(i, 8))))
+                i = Add(i, 1)
+            }
+        }
+        CCFanState.selftest_sum = sum
+
+        Deallocate(out, Multiply(4, 8))
+        Deallocate(strs, Multiply(4, 8))
+        ReturnValue(sum)
     }
 }
 
