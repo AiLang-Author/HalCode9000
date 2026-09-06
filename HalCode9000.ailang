@@ -2914,6 +2914,43 @@ Function.CC_ChatLoop {
                         UI.ChatTag("✗", "Undo tool execution failed.", 1)
                     }
                 }
+                // /redo — re-apply undone changes. Forms: /redo    /redo N
+                redo_line_match = 0
+                redo_steps = 1
+                IfCondition EqualTo(StringCompare(line, "/redo"), 0) ThenBlock: {
+                    redo_line_match = 1
+                }
+                IfCondition And(EqualTo(redo_line_match, 0), GreaterThan(StringLength(line), 6)) ThenBlock: {
+                    redo_pfx = Allocate(7)
+                    redo_k = 0
+                    WhileLoop LessThan(redo_k, 6) {
+                        SetByte(redo_pfx, redo_k, GetByte(line, redo_k))
+                        redo_k = Add(redo_k, 1)
+                    }
+                    SetByte(redo_pfx, 6, 0)
+                    IfCondition EqualTo(StringCompare(redo_pfx, "/redo "), 0) ThenBlock: {
+                        redo_rest = Add(line, 6)
+                        redo_steps = StringToInt(redo_rest)
+                        IfCondition LessEqual(redo_steps, 0) ThenBlock: { redo_steps = 1 }
+                        redo_line_match = 1
+                    }
+                    Deallocate(redo_pfx, 7)
+                }
+                IfCondition EqualTo(redo_line_match, 1) ThenBlock: {
+                    redo_args = JSON.NewObject()
+                    JSON.SetString(redo_args, "op", "redo")
+                    JSON.SetNumber(redo_args, "steps", redo_steps)
+                    redo_perr = Allocate(8)
+                    StoreValue(redo_perr, 0, "dword")
+                    redo_res = IPCDispatch.Dispatch("Undo", redo_args, "redo_cmd", redo_perr)
+                    redo_perr_val = Dereference(redo_perr, "dword")
+                    Deallocate(redo_perr, 8)
+                    IfCondition NotEqual(redo_res, 0) ThenBlock: {
+                        UI.ChatPrintln(redo_res)
+                    } ElseBlock: {
+                        UI.ChatTag("✗", "Redo tool execution failed.", 1)
+                    }
+                }
                 IfCondition EqualTo(StringCompare(line, "/new"), 0) ThenBlock: {
                     CC_SaveSessionToPgmem()
                     guid = CC_GenerateSessionGUID()

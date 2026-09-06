@@ -196,6 +196,54 @@ Function.CCWrite_UndoWriteFile {
     }
 }
 
+Function.CCWrite_UnlinkPath {
+    Input: path: Address
+    Body: {
+        SystemCall(CCWriteSys.SYS_UNLINK, path, 0, 0, 0, 0)
+    }
+}
+
+// Drop the redo journal. Any new write invalidates pending redo entries
+// (classic undo/redo semantics: a fresh edit forks a new branch).
+Function.CCWrite_ClearRedo {
+    Body: {
+        CCWrite_UndoEnsureDir()
+        redodir = StringConcat(CCWriteUndo.JOURNAL_DIR, "/redo")
+        SystemCall(CCWriteSys.SYS_MKDIR, redodir, 493, 0, 0, 0)
+
+        hpath = StringConcat(redodir, "/HEAD")
+        rhead = 0
+        fd = SystemCall(CCWriteSys.SYS_OPEN, hpath, 0, 0, 0, 0)
+        IfCondition GreaterEqual(fd, 0) ThenBlock: {
+            buf = Allocate(32)
+            n = SystemCall(CCWriteSys.SYS_READ, fd, buf, 31, 0, 0)
+            SystemCall(CCWriteSys.SYS_CLOSE, fd, 0, 0, 0, 0)
+            IfCondition GreaterThan(n, 0) ThenBlock: {
+                SetByte(buf, n, 0)
+                rhead = StringToInt(buf)
+            }
+            Deallocate(buf, 32)
+        }
+
+        i = 1
+        WhileLoop LessEqual(i, rhead) {
+            num = NumberToString(i)
+            base = StringConcat(redodir, "/")
+            base = StringConcat(base, num)
+            CCWrite_UnlinkPath(StringConcat(base, ".path"))
+            CCWrite_UnlinkPath(StringConcat(base, ".bak"))
+            CCWrite_UnlinkPath(StringConcat(base, ".new"))
+            i = Add(i, 1)
+        }
+
+        fd2 = SystemCall(CCWriteSys.SYS_OPEN, hpath, 577, 420, 0, 0)
+        IfCondition GreaterEqual(fd2, 0) ThenBlock: {
+            SystemCall(CCWriteSys.SYS_WRITE, fd2, "0", 1, 0, 0)
+            SystemCall(CCWriteSys.SYS_CLOSE, fd2, 0, 0, 0, 0)
+        }
+    }
+}
+
 // Return 1 if the file exists (openable), else 0.
 Function.CCWrite_FileExists {
     Input: path: Address
@@ -263,6 +311,7 @@ Function.CCWrite_RecordUndo {
             CCWrite_UndoWriteFile(npath, "", 0)
         }
         CCWrite_UndoWriteHead(seq)
+        CCWrite_ClearRedo()
     }
 }
 

@@ -2634,6 +2634,8 @@ Function.UI.PrintHelp {
         UI.ChatPrintln("  /resume <id>       load a saved session from pgmem")
         UI.ChatPrintln("  /new [title]       save current session and start a new clean session")
         UI.ChatPrintln("  /compact           park snapshot to pgmem & condense active token window")
+        UI.ChatPrintln("  /undo [N]          undo the last N file edits/writes")
+        UI.ChatPrintln("  /redo [N]          re-apply the last N undone edits/writes")
         UI.ChatPrintln("  /image <path|url>  analyze image file or URL via Vision tool")
         UI.ChatPrintln("  /clear             reset conversation history")
         UI.ChatPrintln("  /logout            clear saved OAuth credentials")

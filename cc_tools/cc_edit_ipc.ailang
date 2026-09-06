@@ -189,6 +189,53 @@ Function.CCEdit_UndoWriteFile {
     }
 }
 
+Function.CCEdit_UnlinkPath {
+    Input: path: Address
+    Body: {
+        SystemCall(CCEditSys.SYS_UNLINK, path, 0, 0, 0, 0)
+    }
+}
+
+// Drop the redo journal. Any new edit invalidates pending redo entries.
+Function.CCEdit_ClearRedo {
+    Body: {
+        CCEdit_UndoEnsureDir()
+        redodir = StringConcat(CCEditUndo.JOURNAL_DIR, "/redo")
+        SystemCall(CCEditSys.SYS_MKDIR, redodir, 493, 0, 0, 0)
+
+        hpath = StringConcat(redodir, "/HEAD")
+        rhead = 0
+        fd = SystemCall(CCEditSys.SYS_OPEN, hpath, 0, 0, 0, 0)
+        IfCondition GreaterEqual(fd, 0) ThenBlock: {
+            buf = Allocate(32)
+            n = SystemCall(CCEditSys.SYS_READ, fd, buf, 31, 0, 0)
+            SystemCall(CCEditSys.SYS_CLOSE, fd, 0, 0, 0, 0)
+            IfCondition GreaterThan(n, 0) ThenBlock: {
+                SetByte(buf, n, 0)
+                rhead = StringToInt(buf)
+            }
+            Deallocate(buf, 32)
+        }
+
+        i = 1
+        WhileLoop LessEqual(i, rhead) {
+            num = NumberToString(i)
+            base = StringConcat(redodir, "/")
+            base = StringConcat(base, num)
+            CCEdit_UnlinkPath(StringConcat(base, ".path"))
+            CCEdit_UnlinkPath(StringConcat(base, ".bak"))
+            CCEdit_UnlinkPath(StringConcat(base, ".new"))
+            i = Add(i, 1)
+        }
+
+        fd2 = SystemCall(CCEditSys.SYS_OPEN, hpath, 577, 420, 0, 0)
+        IfCondition GreaterEqual(fd2, 0) ThenBlock: {
+            SystemCall(CCEditSys.SYS_WRITE, fd2, "0", 1, 0, 0)
+            SystemCall(CCEditSys.SYS_CLOSE, fd2, 0, 0, 0, 0)
+        }
+    }
+}
+
 Function.CCEdit_RecordUndo {
     Input: path: Address
     Input: before_buf: Address
@@ -202,6 +249,7 @@ Function.CCEdit_RecordUndo {
         bpath = CCEdit_UndoEntryPath(seq, ".bak")
         CCEdit_UndoWriteFile(bpath, before_buf, before_len)
         CCEdit_UndoWriteHead(seq)
+        CCEdit_ClearRedo()
     }
 }
 

@@ -17,11 +17,13 @@ view.
 - Hooks: `cc_edit_ipc` + `cc_write_ipc` (record before-image), `cc_diff_ipc`
   (already built), `CC_ChatLoop` (slash-command wiring).
 - Why: "Can it un-break my repo" is the #1 thing users judge an agent on.
-- Status: ✅ **core undo stack done** — `cc_undo_ipc` journal + `/undo`
-  (and `/undo N`, `/undo list`, `/undo status`, `/undo clear`) + `Undo` tool
-  all wired; every Write/Edit records a before-image under
-  `~/.halcode/undo/`. Still open: `/redo` (needs a redo journal) and the
-  `Diff`-backed "review what changed this turn" view.
+- Status: ✅ **undo/redo stack done** — `cc_undo_ipc` journal + `/undo`
+  (and `/undo N`, `/undo list`, `/undo status`, `/undo clear`) + `/redo`
+  (and `/redo N`) + `Undo` tool all wired. Every Write/Edit records a
+  before-image under `~/.halcode/undo/`; undo pushes an after-image onto a
+  symmetric `~/.halcode/undo/redo/` journal (so `/redo` can re-apply it and
+  `/undo` can then un-do it again); any new Write/Edit invalidates pending
+  redos. Still open: the `Diff`-backed "review what changed this turn" view.
 
 ### 2. Auto-compaction (already planned as 17.5)
 Go past the current "context at N% — checkpoint parked" cliff. At ~70%,

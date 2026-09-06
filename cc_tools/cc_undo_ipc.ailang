@@ -1,18 +1,26 @@
-// cc_undo_ipc.ailang — Undo stack for Write/Edit operations.
+// cc_undo_ipc.ailang — Undo/redo stack for Write/Edit operations.
 //
 // Every Write/Edit records a before-image into a journal under
-// $HOME/.halcode/undo/. This worker pops entries back off the journal:
+// $HOME/.halcode/undo/. This worker pops entries back off the journal,
+// and maintains a symmetric redo journal so undone changes can be re-applied:
 //
 //   op=undo   [steps=N]  — restore the last N changes (default 1)
-//   op=list              — show the stack (most recent first)
+//   op=redo   [steps=N]  — re-apply the last N undone changes (default 1)
+//   op=list              — show the undo stack (most recent first)
 //   op=status            — return the number of pending changes
-//   op=clear             — drop the entire stack
+//   op=clear             — drop the undo and redo stacks
 //
-// Journal layout:
+// Undo journal layout:
 //   $HOME/.halcode/undo/HEAD       — decimal sequence number (current head)
 //   $HOME/.halcode/undo/<seq>.path — absolute path that was modified
 //   $HOME/.halcode/undo/<seq>.bak  — before-image bytes (absent for new files)
 //   $HOME/.halcode/undo/<seq>.new  — marker present iff the file was newly created
+//
+// Redo journal layout (under $HOME/.halcode/undo/redo/):
+//   HEAD       — decimal sequence number (current redo head)
+//   <seq>.path — absolute path that was modified
+//   <seq>.bak  — after-image bytes to re-apply on redo
+//   <seq>.new  — marker present iff redo re-creates the file
 //
 // Build:
 //   ./ailang.x Applications/HalCode9000/cc_tools/cc_undo_ipc.ailang \
@@ -46,6 +54,7 @@ FixedPool.CCUndoConst {
     "SOCK_PATH":   Initialize=0, CanChange=True
     "SOCK_DIR":    Initialize=0, CanChange=True
     "JOURNAL_DIR": Initialize=0, CanChange=True
+    "REDO_DIR":    Initialize=0, CanChange=True
     "MAX_FILE":    Initialize=4194304
     "BACKLOG":     Initialize=8
 }
@@ -63,8 +72,8 @@ FixedPool.CCUndoState {
 Function.CCUndo_BuildSchema {
     Output: Address
     Body: {
-        s = UtilArgs_NewSchema("Undo", "Pop the edit/write undo stack: restore files changed this session")
-        UtilArgs_AddField(s, "op",    "string", 1, "Operation: undo | list | status | clear", "op")
+        s = UtilArgs_NewSchema("Undo", "Pop or re-apply the edit/write undo stack: restore or redo files changed this session")
+        UtilArgs_AddField(s, "op",    "string", 1, "Operation: undo | redo | list | status | clear", "op")
         UtilArgs_AddField(s, "steps", "int",    0, "Number of changes to undo (default 1)", "steps")
         UtilArgs_SetDefault(s, "steps", "1")
         ReturnValue(s)
@@ -135,6 +144,81 @@ Function.CCUndo_EnsureDir {
         IfCondition EqualTo(home, 0) ThenBlock: { home = "/root" }
         CCUndoConst.JOURNAL_DIR = StringConcat(home, "/.halcode/undo")
         SystemCall(CCUndoSys.SYS_MKDIR, CCUndoConst.JOURNAL_DIR, 493, 0, 0, 0)
+    }
+}
+
+// Resolve the redo journal directory into CCUndoConst.REDO_DIR.
+Function.CCUndo_RedoEnsureDir {
+    Body: {
+        IfCondition NotEqual(CCUndoConst.REDO_DIR, 0) ThenBlock: { ReturnValue(0) }
+        CCUndo_EnsureDir()
+        CCUndoConst.REDO_DIR = StringConcat(CCUndoConst.JOURNAL_DIR, "/redo")
+        SystemCall(CCUndoSys.SYS_MKDIR, CCUndoConst.REDO_DIR, 493, 0, 0, 0)
+    }
+}
+
+Function.CCUndo_RedoHeadPath {
+    Output: Address
+    Body: {
+        CCUndo_RedoEnsureDir()
+        ReturnValue(StringConcat(CCUndoConst.REDO_DIR, "/HEAD"))
+    }
+}
+
+// Build "<redo>/<seq><suffix>" e.g. "/home/bob/.halcode/undo/redo/3.bak".
+Function.CCUndo_RedoEntryPath {
+    Input: seq: Integer
+    Input: suffix: Address
+    Output: Address
+    Body: {
+        CCUndo_RedoEnsureDir()
+        num = NumberToString(seq)
+        p = StringConcat(CCUndoConst.REDO_DIR, "/")
+        p = StringConcat(p, num)
+        p = StringConcat(p, suffix)
+        ReturnValue(p)
+    }
+}
+
+// Read the redo HEAD file as an integer. Returns 0 if missing/corrupt.
+Function.CCUndo_ReadRedoHead {
+    Output: Integer
+    Body: {
+        path = CCUndo_RedoHeadPath()
+        fd = SystemCall(CCUndoSys.SYS_OPEN, path, 0, 0, 0, 0)
+        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
+        buf = Allocate(32)
+        n = SystemCall(CCUndoSys.SYS_READ, fd, buf, 31, 0, 0)
+        SystemCall(CCUndoSys.SYS_CLOSE, fd, 0, 0, 0, 0)
+        IfCondition LessEqual(n, 0) ThenBlock: {
+            Deallocate(buf, 32)
+            ReturnValue(0)
+        }
+        SetByte(buf, n, 0)
+        val = StringToInt(buf)
+        Deallocate(buf, 32)
+        ReturnValue(val)
+    }
+}
+
+// Write the redo HEAD file. Returns 1 on success, 0 on failure.
+Function.CCUndo_WriteRedoHead {
+    Input: val: Integer
+    Output: Integer
+    Body: {
+        path = CCUndo_RedoHeadPath()
+        str = NumberToString(val)
+        fd = SystemCall(CCUndoSys.SYS_OPEN, path, 577, 420, 0, 0)
+        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
+        written = 0
+        slen = StringLength(str)
+        WhileLoop LessThan(written, slen) {
+            n = SystemCall(CCUndoSys.SYS_WRITE, fd, Add(str, written), Subtract(slen, written), 0, 0)
+            IfCondition LessEqual(n, 0) ThenBlock: { BreakLoop }
+            written = Add(written, n)
+        }
+        SystemCall(CCUndoSys.SYS_CLOSE, fd, 0, 0, 0, 0)
+        ReturnValue(1)
     }
 }
 
@@ -287,6 +371,53 @@ Function.CCUndo_WriteErr {
     }
 }
 
+// Push an entry onto the undo journal. Used by redo so a re-applied change
+// can itself be undone again.
+Function.CCUndo_RecordUndoEntry {
+    Input: path: Address
+    Input: before: Address
+    Input: before_len: Integer
+    Input: is_new: Integer
+    Body: {
+        CCUndo_EnsureDir()
+        head = CCUndo_ReadHead()
+        seq = Add(head, 1)
+        ppath = CCUndo_EntryPath(seq, ".path")
+        CCUndo_WriteFile(ppath, path, StringLength(path))
+        IfCondition EqualTo(is_new, 1) ThenBlock: {
+            npath = CCUndo_EntryPath(seq, ".new")
+            CCUndo_WriteFile(npath, "", 0)
+        } ElseBlock: {
+            bpath = CCUndo_EntryPath(seq, ".bak")
+            CCUndo_WriteFile(bpath, before, before_len)
+        }
+        CCUndo_WriteHead(seq)
+    }
+}
+
+// Push an entry onto the redo journal. Used by undo so an undone change
+// can be re-applied later.
+Function.CCUndo_RecordRedoEntry {
+    Input: path: Address
+    Input: after: Address
+    Input: after_len: Integer
+    Input: is_new: Integer
+    Body: {
+        CCUndo_RedoEnsureDir()
+        head = CCUndo_ReadRedoHead()
+        seq = Add(head, 1)
+        ppath = CCUndo_RedoEntryPath(seq, ".path")
+        CCUndo_WriteFile(ppath, path, StringLength(path))
+        bpath = CCUndo_RedoEntryPath(seq, ".bak")
+        CCUndo_WriteFile(bpath, after, after_len)
+        IfCondition EqualTo(is_new, 1) ThenBlock: {
+            npath = CCUndo_RedoEntryPath(seq, ".new")
+            CCUndo_WriteFile(npath, "", 0)
+        }
+        CCUndo_WriteRedoHead(seq)
+    }
+}
+
 // =============================================================================
 // OPERATIONS
 // =============================================================================
@@ -347,7 +478,20 @@ Function.CCUndo_DoClear {
             i = Add(i, 1)
         }
         CCUndo_WriteHead(0)
-        cleared = StringConcat("undo stack cleared (", NumberToString(head))
+
+        CCUndo_RedoEnsureDir()
+        rhead = CCUndo_ReadRedoHead()
+        ri = 1
+        WhileLoop LessEqual(ri, rhead) {
+            CCUndo_Unlink(CCUndo_RedoEntryPath(ri, ".path"))
+            CCUndo_Unlink(CCUndo_RedoEntryPath(ri, ".bak"))
+            CCUndo_Unlink(CCUndo_RedoEntryPath(ri, ".new"))
+            ri = Add(ri, 1)
+        }
+        CCUndo_WriteRedoHead(0)
+
+        total = Add(head, rhead)
+        cleared = StringConcat("undo/redo stacks cleared (", NumberToString(total))
         cleared = StringConcat(cleared, " entries removed)")
         ReturnValue(cleared)
     }
@@ -381,7 +525,12 @@ Function.CCUndo_DoUndo {
                 result = StringConcat(result, NumberToString(seq))
             } ElseBlock: {
                 newmark = CCUndo_EntryPath(seq, ".new")
-                IfCondition EqualTo(CCUndo_FileExists(newmark), 1) ThenBlock: {
+                is_new = CCUndo_FileExists(newmark)
+                // Capture the after-image (current file content) so redo can
+                // re-apply this exact change later.
+                afterdata = CCUndo_ReadFile(path_str)
+                after_len = CCUndoState.bak_len
+                IfCondition EqualTo(is_new, 1) ThenBlock: {
                     CCUndo_Unlink(path_str)
                     result = StringConcat(result, "\n  removed ")
                     result = StringConcat(result, path_str)
@@ -402,6 +551,9 @@ Function.CCUndo_DoUndo {
                         }
                     }
                 }
+                IfCondition NotEqual(afterdata, 0) ThenBlock: {
+                    CCUndo_RecordRedoEntry(path_str, afterdata, after_len, is_new)
+                }
                 CCUndo_Unlink(epath)
                 CCUndo_Unlink(CCUndo_EntryPath(seq, ".bak"))
                 CCUndo_Unlink(newmark)
@@ -410,6 +562,87 @@ Function.CCUndo_DoUndo {
             k = Add(k, 1)
         }
         CCUndo_WriteHead(remaining)
+        ReturnValue(result)
+    }
+}
+
+Function.CCUndo_DoRedo {
+    Input: steps: Integer
+    Input: err_buf: Address
+    Output: Address
+    Body: {
+        CCUndo_RedoEnsureDir()
+        rhead = CCUndo_ReadRedoHead()
+        IfCondition EqualTo(rhead, 0) ThenBlock: {
+            CCUndo_WriteErr(err_buf, "nothing to redo")
+            ReturnValue(0)
+        }
+        IfCondition LessEqual(steps, 0) ThenBlock: { steps = 1 }
+        IfCondition GreaterThan(steps, rhead) ThenBlock: { steps = rhead }
+
+        result = StringConcat("Redid ", NumberToString(steps))
+        result = StringConcat(result, " change(s):")
+
+        remaining = rhead
+        k = 0
+        WhileLoop LessThan(k, steps) {
+            seq = remaining
+            epath = CCUndo_RedoEntryPath(seq, ".path")
+            path_str = CCUndo_ReadFile(epath)
+            IfCondition EqualTo(path_str, 0) ThenBlock: {
+                result = StringConcat(result, "\n  [skip] missing redo entry ")
+                result = StringConcat(result, NumberToString(seq))
+            } ElseBlock: {
+                newmark = CCUndo_RedoEntryPath(seq, ".new")
+                is_new = CCUndo_FileExists(newmark)
+                bak = CCUndo_RedoEntryPath(seq, ".bak")
+                IfCondition EqualTo(is_new, 1) ThenBlock: {
+                    afterdata = CCUndo_ReadFile(bak)
+                    IfCondition EqualTo(afterdata, 0) ThenBlock: {
+                        result = StringConcat(result, "\n  [error] missing redo backup for ")
+                        result = StringConcat(result, path_str)
+                    } ElseBlock: {
+                        ok = CCUndo_WriteFile(path_str, afterdata, CCUndoState.bak_len)
+                        IfCondition EqualTo(ok, 1) ThenBlock: {
+                            CCUndo_RecordUndoEntry(path_str, 0, 0, 1)
+                            result = StringConcat(result, "\n  recreated ")
+                            result = StringConcat(result, path_str)
+                        } ElseBlock: {
+                            result = StringConcat(result, "\n  [error] redo create failed: ")
+                            result = StringConcat(result, path_str)
+                        }
+                    }
+                } ElseBlock: {
+                    beforedata = CCUndo_ReadFile(path_str)
+                    before_len = CCUndoState.bak_len
+                    afterdata = CCUndo_ReadFile(bak)
+                    IfCondition EqualTo(afterdata, 0) ThenBlock: {
+                        result = StringConcat(result, "\n  [error] missing redo backup for ")
+                        result = StringConcat(result, path_str)
+                    } ElseBlock: {
+                        ok = CCUndo_WriteFile(path_str, afterdata, CCUndoState.bak_len)
+                        IfCondition EqualTo(ok, 1) ThenBlock: {
+                            IfCondition EqualTo(beforedata, 0) ThenBlock: {
+                                CCUndo_RecordUndoEntry(path_str, 0, 0, 1)
+                            } ElseBlock: {
+                                CCUndo_RecordUndoEntry(path_str, beforedata, before_len, 0)
+                            }
+                            result = StringConcat(result, "\n  reapplied ")
+                            result = StringConcat(result, path_str)
+                        } ElseBlock: {
+                            result = StringConcat(result, "\n  [error] redo apply failed: ")
+                            result = StringConcat(result, path_str)
+                        }
+                    }
+                }
+                CCUndo_Unlink(epath)
+                CCUndo_Unlink(CCUndo_RedoEntryPath(seq, ".bak"))
+                CCUndo_Unlink(newmark)
+            }
+            remaining = Subtract(remaining, 1)
+            k = Add(k, 1)
+        }
+        CCUndo_WriteRedoHead(remaining)
         ReturnValue(result)
     }
 }
@@ -512,9 +745,13 @@ Function.CCUndo_HandleRequest {
                 steps = UtilArgs_GetInt(validated, "steps")
                 content = CCUndo_DoUndo(steps, err_buf)
             }
+            IfCondition EqualTo(StringCompare(op, "redo"), 0) ThenBlock: {
+                steps = UtilArgs_GetInt(validated, "steps")
+                content = CCUndo_DoRedo(steps, err_buf)
+            }
             IfCondition EqualTo(content, 0) ThenBlock: {
                 IfCondition EqualTo(GetByte(err_buf, 0), 0) ThenBlock: {
-                    CCUndo_SendError(client_fd, id, "unknown op: use undo, list, status, or clear")
+                    CCUndo_SendError(client_fd, id, "unknown op: use undo, redo, list, status, or clear")
                 } ElseBlock: {
                     CCUndo_SendError(client_fd, id, err_buf)
                 }
