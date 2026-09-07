@@ -84,6 +84,7 @@ FixedPool.CCRunState {
     "log_fd":        Initialize=0, CanChange=True  // 0 = not open
     "log_open":      Initialize=0, CanChange=True  // 1 when log_fd is valid
     "log_bytes":     Initialize=0, CanChange=True  // bytes written this session
+    "line_buf":      Initialize=0, CanChange=True  // persistent 1MB SSE line buffer (reuse, no per-turn alloc)
 }
 
 // MCP on-demand tool table — stores manifest entries for spawn-per-call dispatch.
@@ -1145,7 +1146,12 @@ Function.CC_RunTurn {
 
             sse_state = Allocate(CCConst.SSE_STATE_SZ)
             SSE.Init(sse_state, CCConst.SSE_STATE_SZ)
-            line_buf = Allocate(CCConst.LINE_BUF_SZ)
+            // Reuse a single 1MB scratch buffer for the stream read instead of
+            // allocating/freeing a fresh block on every request.
+            IfCondition EqualTo(CCRunState.line_buf, 0) ThenBlock: {
+                CCRunState.line_buf = Allocate(CCConst.LINE_BUF_SZ)
+            }
+            line_buf = CCRunState.line_buf
             CC_DebugLog("Starting API stream read. See /tmp/hal_turn.log for raw line data.\n")
 
             stream_done = 0
@@ -1249,8 +1255,11 @@ Function.CC_RunTurn {
             }
 
             HTTP.CloseStream(handle)
-            Deallocate(line_buf, CCConst.LINE_BUF_SZ)
             Deallocate(sse_state, CCConst.SSE_STATE_SZ)
+            // Free the request body. It is a StringConcat result (JSON serialize),
+            // so its arena allocation size is StringLength+1. Without this the
+            // ~300-500KB body leaks on every request (never reclaimed by the arena).
+            Deallocate(body, Add(StringLength(body), 1))
 
             // Check if the backend saw a finish_reason before the connection dropped
             IfCondition EqualTo(clean_stop, 0) ThenBlock: {
