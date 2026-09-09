@@ -8,7 +8,6 @@ deepseek_agent_docs.md
 GEMINI_PROMPT_wire_backend.txt
 backends/GEMINI_PROMPT_openai_backend.txt
 hal_tool_test.txt
-intrusivethoughts.json
 "deepseek anthropic connector info.txt"
 deepseek\ anthropic\ connector\ info.txt
 model\ rating\ template.txt
@@ -22,6 +21,11 @@ workspace.code-workspace
 # ── Build / object files ─────────────────────────────────────────────────────
 *.o
 *.a
+*.bak
+*.zip
+__pycache__/
+*.pyc
+nohup.out
 
 # ── OS junk ──────────────────────────────────────────────────────────────────
 .DS_Store
