@@ -9,7 +9,7 @@
 // Build: ./ailang.x Applications/ClaudeCode/cc_tools/cc_write_ipc.ailang cc_write_ipc.x
 // Run:   ./cc_write_ipc.x   (binds /tmp/ailang_cctools/Write.sock)
 //
-// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. SCSL.
+// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.
 
 LibraryImport.Arena
 LibraryImport.Socket

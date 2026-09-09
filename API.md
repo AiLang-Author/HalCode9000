@@ -577,4 +577,4 @@ done
 
 ---
 
-*Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. SCSL.*
+*Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.*

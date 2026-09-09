@@ -26,7 +26,7 @@
 //   2 = OpenAI-compatible (OpenAI, Groq, xAI, Google, Ollama, ...)
 //   3 = Gemini (Google API - distinct to handle specific endpoint quirks)
 //
-// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. SCSL.
+// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.
 
 LibraryImport.Arena
 LibraryImport.JSON

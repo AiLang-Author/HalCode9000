@@ -232,4 +232,4 @@ buffers handle up to `wmem_max` (typically 208 KB on Linux).
 
 ---
 
-*Version: 1.0 — 2026. Licensed under SCSL.*
+*Version: 1.0 — 2026. Licensed under MIT.*

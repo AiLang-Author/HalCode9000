@@ -11,7 +11,7 @@
 // Build: ./ailang.x cc_tools/cc_skills_ipc.ailang cc_skills_ipc.x
 // Run:   ./cc_skills_ipc.x   (binds @halcode/Skills)
 //
-// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. SCSL.
+// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.
 
 LibraryImport.Arena
 LibraryImport.Socket

@@ -8,7 +8,7 @@
 //
 // Uses fstatat for size + type detection — works on NTFS/WSL2 (no DT_UNKNOWN issue).
 //
-// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. SCSL.
+// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.
 
 LibraryImport.Arena
 LibraryImport.Socket

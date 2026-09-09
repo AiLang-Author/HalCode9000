@@ -16,7 +16,7 @@
 // Build: ./ailang.x Applications/HalCode9000/cc_tools/cc_ls_ipc.ailang cc_ls_ipc.x
 // Run:   ./cc_ls_ipc.x   (binds /tmp/ailang_cctools/LS.sock)
 //
-// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. SCSL.
+// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.
 
 LibraryImport.Arena
 LibraryImport.Socket

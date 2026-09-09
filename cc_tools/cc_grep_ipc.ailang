@@ -10,7 +10,7 @@
 //         ignore_case (int, default 0), include (string, optional),
 //         max_results (int, default 0 = unlimited; per-file like grep -m)
 //
-// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. SCSL.
+// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.
 
 LibraryImport.Arena
 LibraryImport.Regex_Thompson

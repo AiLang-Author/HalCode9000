@@ -13,7 +13,7 @@
 //   { "ok": bool, "file": "<path>", "symbols": [...], "calls": [...],
 //     "imports": [...], "diagnostics": [...] }
 //
-// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. SCSL.
+// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.
 
 LibraryImport.Arrays
 LibraryImport.JSON

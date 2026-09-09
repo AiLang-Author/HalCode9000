@@ -28,7 +28,7 @@
 //   UI.SessionHeader(version, model, cwd) — small mascot + info block
 //   UI.PrintHelp()        — slash-command help
 //
-// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. SCSL.
+// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.
 
 LibraryImport.Arena
 LibraryImport.StringUtils

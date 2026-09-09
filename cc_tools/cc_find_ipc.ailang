@@ -9,7 +9,7 @@
 //
 // Safety: blocks /, /mnt, /mnt/c, /mnt/c/<one component>. Allows /mnt/c/X/Y/... (4+ slashes).
 //
-// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. SCSL.
+// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.
 
 LibraryImport.Arena
 LibraryImport.Socket

@@ -10,7 +10,7 @@
 // Build: ./ailang.x Applications/ClaudeCode/cc_tools/cc_webfetch_ipc.ailang cc_webfetch_ipc.x
 // Run:   ./cc_webfetch_ipc.x   (binds /tmp/ailang_cctools/WebFetch.sock)
 //
-// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. SCSL.
+// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.
 
 LibraryImport.Arena
 LibraryImport.Socket

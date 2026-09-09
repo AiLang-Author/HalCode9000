@@ -6,7 +6,7 @@
 //
 // Build: ./ailang.x Applications/HalCode9000/cc_tools/cc_js_ipc.ailang Applications/HalCode9000/cc_js_ipc.x
 //
-// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. SCSL.
+// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.
 
 LibraryImport.Arena
 LibraryImport.Socket

@@ -16,7 +16,7 @@
 // Build: ./ailang.x Applications/ClaudeCode/cc_tools/cc_bash_ipc.ailang cc_bash_ipc.x
 // Run:   ./cc_bash_ipc.x   (binds /tmp/ailang_cctools/Bash.sock)
 //
-// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. SCSL.
+// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.
 
 LibraryImport.Arena
 LibraryImport.Socket

@@ -5,7 +5,7 @@
 // Action: nanosleep for the requested duration, then return.
 //         Does NOT touch Pgmem — safe to call while agent daemons are running.
 //
-// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. SCSL.
+// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.
 
 LibraryImport.Arena
 LibraryImport.Socket

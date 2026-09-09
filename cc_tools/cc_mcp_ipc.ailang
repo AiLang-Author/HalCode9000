@@ -9,7 +9,7 @@
 //   Routes tool calls to @halcode/Agent, Bash, Relmem, Pgmem.
 //   Register: claude mcp add -s user halcode9000 -- /path/to/cc_mcp_ipc.x
 //
-// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. SCSL.
+// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.
 
 LibraryImport.Arena
 LibraryImport.Socket

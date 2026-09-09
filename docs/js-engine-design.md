@@ -3,7 +3,7 @@
 **Revision:** 1.0  
 **Date:** 2026-05-16  
 **Author:** Sean Collins, 2 Paws Machine and Engineering  
-**License:** SCSL  
+**License:** MIT  
 **Test262 Compliance:** 12,567 / 23,899 (52.6%)
 
 ---

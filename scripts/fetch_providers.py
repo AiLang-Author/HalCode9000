@@ -7,7 +7,7 @@ and generates or updates standard JSON configuration files in providers/ and ~/.
 
 Automatically loads API keys from ~/.halcode/keys.env and environment variables.
 
-Copyright (c) 2026 Sean Collins, 2 Paws Machine and Engineering. SCSL.
+Copyright (c) 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.
 """
 
 import os

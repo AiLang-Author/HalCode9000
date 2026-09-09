@@ -16,7 +16,7 @@
 #     If you ctrl-C mid-copy, your project-root binaries stay coherent
 #     because we copy to *.new files first, then rename.
 #
-# Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. SCSL.
+# Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.
 
 set -euo pipefail
 

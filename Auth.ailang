@@ -31,7 +31,7 @@
 // subscription scopes. The PR proposes adding such a path. See
 // ClaudeCode.md "OAuth & client_id reuse" for the full transparency note.
 //
-// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. SCSL.
+// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.
 
 LibraryImport.Arena
 LibraryImport.JSON

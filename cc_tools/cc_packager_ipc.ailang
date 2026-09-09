@@ -8,7 +8,7 @@
 // Install, Build, Pack) in the cc_tools IPC envelope so HalCode9000
 // can call them directly.
 //
-// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. SCSL.
+// Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.
 
 LibraryImport.Arena
 LibraryImport.Socket

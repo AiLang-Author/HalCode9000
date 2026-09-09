@@ -380,4 +380,4 @@ node_modules and 200 MB+ after. We're roughly 1/250th the size.
 
 ---
 
-*Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. SCSL.*
+*Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.*
