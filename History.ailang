@@ -32,6 +32,7 @@ LibraryImport.StringUtils
 
 FixedPool.HistConst {
     "MAX_MESSAGES":  Initialize=10
+    "PIN_LONG":      Initialize=400
 }
 
 FixedPool.HistState {
@@ -40,6 +41,10 @@ FixedPool.HistState {
     "initialized":   Initialize=0, CanChange=True
     "session_id":    Initialize=0, CanChange=True
     "title":         Initialize=0, CanChange=True
+    "last_text":     Initialize=0, CanChange=True
+    "last_text_len": Initialize=0, CanChange=True
+    "last_long":     Initialize=0, CanChange=True
+    "last_long_len": Initialize=0, CanChange=True
 }
 
 // =============================================================================
@@ -55,6 +60,10 @@ Function.History.Init {
         HistState.initialized = 1
         HistState.session_id = 0
         HistState.title = 0
+        HistState.last_text = 0
+        HistState.last_text_len = 0
+        HistState.last_long = 0
+        HistState.last_long_len = 0
     }
 }
 
@@ -126,9 +135,6 @@ Function.History_EvictIfNeeded {
             }
             
             History_DropFront(drop_n)
-            PrintMessage("[history] evicted ")
-            PrintNumber(drop_n)
-            PrintMessage(" oldest message(s) - context window pressure\n")
         }
     }
 }
@@ -199,7 +205,9 @@ Function.History_DropRange {
 // bundles until we are at MAX_MESSAGES. Keeps messages[0] (the user prompt)
 // and the trailing assistant (the final reply).
 Function.History.EvictCompletedTurns {
+    Output: Integer
     Body: {
+        total_dropped = 0
         WhileLoop GreaterThan(HistState.count, HistConst.MAX_MESSAGES) {
             n = JSON.ArrayLength(HistState.messages)
             IfCondition LessEqual(n, 2) ThenBlock: { BreakLoop }
@@ -247,10 +255,9 @@ Function.History.EvictCompletedTurns {
             drop_n = Subtract(end, a)
             IfCondition LessEqual(drop_n, 0) ThenBlock: { BreakLoop }
             History_DropRange(a, drop_n)
-            PrintMessage("[history] evicted completed bundle of ")
-            PrintNumber(drop_n)
-            PrintMessage(" message(s)\n")
+            total_dropped = Add(total_dropped, drop_n)
         }
+        ReturnValue(total_dropped)
     }
 }
 
@@ -414,6 +421,52 @@ Function.History.GetTitle {
 Function.History.SetTitle {
     Input: title: Address
     Body: { HistState.title = title }
+}
+
+// Copy visible assistant text out of the live backend buffer. Short
+// "I'll save that" turns must not overwrite a long survey. /save reads
+// last_long if set, else last_text. Survives eviction.
+Function.History.PinAssistantText {
+    Input: text: Address
+    Body: {
+        IfCondition EqualTo(text, 0) ThenBlock: { ReturnValue(0) }
+        n = StringLength(text)
+        IfCondition EqualTo(n, 0) ThenBlock: { ReturnValue(0) }
+        owned = History_Own(text)
+        IfCondition NotEqual(HistState.last_text, 0) ThenBlock: {
+            Deallocate(HistState.last_text, Add(HistState.last_text_len, 1))
+        }
+        HistState.last_text = owned
+        HistState.last_text_len = n
+        IfCondition GreaterEqual(n, HistConst.PIN_LONG) ThenBlock: {
+            owned2 = History_Own(text)
+            IfCondition NotEqual(HistState.last_long, 0) ThenBlock: {
+                Deallocate(HistState.last_long, Add(HistState.last_long_len, 1))
+            }
+            HistState.last_long = owned2
+            HistState.last_long_len = n
+        }
+    }
+}
+
+Function.History.GetPinnedText {
+    Output: Address
+    Body: {
+        IfCondition NotEqual(HistState.last_long, 0) ThenBlock: {
+            ReturnValue(HistState.last_long)
+        }
+        ReturnValue(HistState.last_text)
+    }
+}
+
+Function.History.GetPinnedLen {
+    Output: Integer
+    Body: {
+        IfCondition NotEqual(HistState.last_long, 0) ThenBlock: {
+            ReturnValue(HistState.last_long_len)
+        }
+        ReturnValue(HistState.last_text_len)
+    }
 }
 
 Function.History.SerializeToJSON {

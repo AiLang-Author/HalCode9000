@@ -545,6 +545,26 @@ Function.Anthropic.CommitAssistantToHistory {
     }
 }
 
+// Heap-copy a string so the caller can Deallocate/free the source without
+// dangling the value we hand to history. JSON.SetString aliases, so any
+// string stored into a history-owned object must be an owned copy.
+Function.Anthropic_StrDup {
+    Input: src: Address
+    Output: Address
+    Body: {
+        IfCondition EqualTo(src, 0) ThenBlock: { ReturnValue(0) }
+        slen = StringLength(src)
+        dst = Allocate(Add(slen, 1))
+        k = 0
+        WhileLoop LessThan(k, slen) {
+            SetByte(dst, k, GetByte(src, k))
+            k = Add(k, 1)
+        }
+        SetByte(dst, slen, 0)
+        ReturnValue(dst)
+    }
+}
+
 // Append a user message containing tool_result blocks (one per dispatched tool).
 // results_arr is a JSON array of {tool_use_id, content, is_error?} objects.
 Function.Anthropic.AppendToolResultsToHistory {
@@ -561,9 +581,9 @@ Function.Anthropic.AppendToolResultsToHistory {
                 tr = JSON.NewObject()
                 JSON.SetString(tr, "type", "tool_result")
                 tid = JSON.GetString(r, "tool_use_id")
-                IfCondition NotEqual(tid, 0) ThenBlock: { JSON.SetString(tr, "tool_use_id", tid) }
+                IfCondition NotEqual(tid, 0) ThenBlock: { JSON.SetString(tr, "tool_use_id", Anthropic_StrDup(tid)) }
                 content = JSON.GetString(r, "content")
-                IfCondition NotEqual(content, 0) ThenBlock: { JSON.SetString(tr, "content", content) }
+                IfCondition NotEqual(content, 0) ThenBlock: { JSON.SetString(tr, "content", Anthropic_StrDup(content)) }
                 is_err = JSON.GetBool(r, "is_error")
                 IfCondition EqualTo(is_err, 1) ThenBlock: { JSON.SetBool(tr, "is_error", 1) }
                 JSON.PushObject(wrapped, tr)

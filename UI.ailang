@@ -2659,6 +2659,7 @@ Function.UI.PrintHelp {
         UI.ChatPrintln("")
         UI.ChatTag("✻", "HAL Code 9000 — I am completely operational.", UIColors.ORANGE_FG)
         UI.ChatPrintln("  /help              this list")
+        UI.ChatPrintln("  /save [path]       write last long assistant reply to disk (no model)")
         UI.ChatPrintln("  /auto              toggle autonomous mode (skip 25-tool pause)")
         UI.ChatPrintln("  /tools             toggle tool detail (compact: names / expanded: full) — also Ctrl+O")
         UI.ChatPrintln("  /project           show pgmem project info + active context")

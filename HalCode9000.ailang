@@ -218,6 +218,51 @@ Function.CC_SleepMs {
     }
 }
 
+Function.CC_StartsWith {
+    Input: line: Address
+    Input: pfx: Address
+    Output: Integer
+    Body: {
+        IfCondition Or(EqualTo(line, 0), EqualTo(pfx, 0)) ThenBlock: { ReturnValue(0) }
+        i = 0
+        WhileLoop 1 {
+            pc = GetByte(pfx, i)
+            IfCondition EqualTo(pc, 0) ThenBlock: { ReturnValue(1) }
+            IfCondition NotEqual(GetByte(line, i), pc) ThenBlock: { ReturnValue(0) }
+            i = Add(i, 1)
+        }
+    }
+}
+
+// Write the pinned assistant blob to disk. No model, no history rewrite.
+Function.CC_SavePinned {
+    Input: path: Address
+    Body: {
+        out_path = path
+        IfCondition Or(EqualTo(out_path, 0), EqualTo(StringLength(out_path), 0)) ThenBlock: {
+            out_path = "docs/last-assistant.md"
+        }
+        txt = History.GetPinnedText()
+        n = History.GetPinnedLen()
+        IfCondition Or(EqualTo(txt, 0), EqualTo(n, 0)) ThenBlock: {
+            UI.ChatTag("✗", "Nothing pinned. Need an assistant reply first (short 'ok' does not pin).", 1)
+            ReturnValue(0)
+        }
+        fd = SystemCall(CCSys.SYS_OPEN, out_path, 577, 420, 0, 0)
+        IfCondition LessThan(fd, 0) ThenBlock: {
+            UI.ChatTag("✗", StringConcat("cannot write ", out_path), 1)
+            ReturnValue(0)
+        }
+        SystemCall(CCSys.SYS_WRITE, fd, txt, n, 0, 0)
+        SystemCall(CCSys.SYS_CLOSE, fd, 0, 0, 0, 0)
+        okm = StringConcat("saved ", out_path)
+        okm = StringConcat(okm, " (")
+        okm = StringConcat(okm, NumberToString(n))
+        okm = StringConcat(okm, " bytes, verbatim)")
+        UI.ChatTag("✓", okm, 2)
+    }
+}
+
 // Non-blocking sleep: pumps UI animation each 16ms so the screen stays live
 // and ESC interrupts work during retry back-off delays.
 Function.CC_SleepAnimated {
@@ -1453,6 +1498,7 @@ Function.CC_RunTurn {
             IfCondition EqualTo(request_ok, 1) ThenBlock: {
                 CC_DebugLog("Committing assistant message to history.\n")
                 Backend.CommitAssistantToHistory()
+                History.PinAssistantText(Backend.GetResponseText())
                 CC_SessionLogResponse()
                 Backend.PrintUsage()
 
@@ -1650,7 +1696,11 @@ Function.CC_RunTurn {
                     CC_DebugLog("No tools requested. Turn complete.\n")
                     Backend.Reset()
                     UI.SetReasoning("")
-                    History.EvictCompletedTurns()
+                    dropped = History.EvictCompletedTurns()
+                    IfCondition GreaterThan(dropped, 0) ThenBlock: {
+                        evict_msg = StringConcat("evicted ", NumberToString(dropped))
+                        UI.ChatTag("·", evict_msg, 8)
+                    }
                     CC_LogStageMemory("AFTER_EVICT_COMPLETED")
                     IfCondition EqualTo(UI.HasInterrupt(), 1) ThenBlock: {
                         steer = UI.ConsumeInterrupt()
@@ -3058,6 +3108,19 @@ Function.CC_ChatLoop {
                 IfCondition EqualTo(StringCompare(line, "/help"), 0) ThenBlock: {
                     UI.PrintHelp()
                 }
+                IfCondition EqualTo(StringCompare(line, "/save"), 0) ThenBlock: {
+                    CC_SavePinned("docs/last-assistant.md")
+                }
+                IfCondition EqualTo(CC_StartsWith(line, "/save "), 1) ThenBlock: {
+                    save_path = Add(line, 6)
+                    WhileLoop EqualTo(GetByte(save_path, 0), 32) {
+                        save_path = Add(save_path, 1)
+                    }
+                    CC_SavePinned(save_path)
+                }
+                IfCondition EqualTo(CC_StartsWith(line, "save this"), 1) ThenBlock: {
+                    CC_SavePinned("docs/last-assistant.md")
+                }
                 IfCondition Or(EqualTo(StringCompare(line, "/mem"), 0), EqualTo(StringCompare(line, "/stats"), 0)) ThenBlock: {
                     CC_PrintMemoryReport()
                 }
@@ -3494,7 +3557,7 @@ Function.CC_ChatLoop {
                 // Treat anything else as a chat turn
                 IfCondition GreaterThan(n, 0) ThenBlock: {
                     first = GetByte(line, 0)
-                    IfCondition NotEqual(first, 47) ThenBlock: {   // not '/'
+                    IfCondition And(NotEqual(first, 47), EqualTo(CC_StartsWith(line, "save this"), 0)) ThenBlock: {
                         CC_SessionLogUser(line)
                         History.AppendUser(line)
                         CC_RunTurn()
