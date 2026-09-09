@@ -5,6 +5,9 @@
 // the request builder can hand them straight to the API request without
 // re-parsing.
 //
+// Eviction copies survivors and JSON.Free's dropped tagged messages.
+// String values in history must be heap-owned (History_SetStr / ParseJSON).
+//
 // Eviction rule: when count exceeds MAX_MESSAGES, drop the oldest TWO
 // entries (a user/assistant pair). Never drop a tool_use/tool_result pair
 // across the boundary — if the next-to-evict message contains tool_use
@@ -139,10 +142,12 @@ Function.History_DropFront {
         old = HistState.messages
         total = JSON.ArrayLength(old)
         IfCondition GreaterEqual(drop_n, total) ThenBlock: {
+            History_FreeDropped(old, 0, total)
             HistState.messages = JSON.NewArray()
             HistState.count = 0
             ReturnValue(0)
         }
+        History_FreeDropped(old, 0, drop_n)
         new_arr = JSON.NewArray()
         i = drop_n
         WhileLoop LessThan(i, total) {
@@ -158,21 +163,152 @@ Function.History_DropFront {
     }
 }
 
+// Drop [start, start+drop_n) without touching the prefix (usually the user
+// prompt). Dropped tagged messages are JSON.Free'd.
+Function.History_DropRange {
+    Input: start: Integer
+    Input: drop_n: Integer
+    Body: {
+        IfCondition LessEqual(drop_n, 0) ThenBlock: { ReturnValue(0) }
+        old = HistState.messages
+        total = JSON.ArrayLength(old)
+        IfCondition LessThan(start, 0) ThenBlock: { ReturnValue(0) }
+        IfCondition GreaterEqual(start, total) ThenBlock: { ReturnValue(0) }
+        end = Add(start, drop_n)
+        IfCondition GreaterThan(end, total) ThenBlock: { end = total }
+        History_FreeDropped(old, start, Subtract(end, start))
+
+        new_arr = JSON.NewArray()
+        i = 0
+        WhileLoop LessThan(i, total) {
+            IfCondition Or(LessThan(i, start), GreaterEqual(i, end)) ThenBlock: {
+                elem_tag = JSON.ArrayGet(old, i)
+                elem = JSON.AsObject(elem_tag)
+                IfCondition NotEqual(elem, 0) ThenBlock: {
+                    JSON.PushObject(new_arr, elem)
+                }
+            }
+            i = Add(i, 1)
+        }
+        HistState.messages = new_arr
+        HistState.count = JSON.ArrayLength(new_arr)
+    }
+}
+
+// After a turn that requested NO more tools, drop oldest assistant+tool
+// bundles until we are at MAX_MESSAGES. Keeps messages[0] (the user prompt)
+// and the trailing assistant (the final reply).
+Function.History.EvictCompletedTurns {
+    Body: {
+        WhileLoop GreaterThan(HistState.count, HistConst.MAX_MESSAGES) {
+            n = JSON.ArrayLength(HistState.messages)
+            IfCondition LessEqual(n, 2) ThenBlock: { BreakLoop }
+
+            a = 1
+            found = 0
+            WhileLoop LessThan(a, n) {
+                msg = JSON.AsObject(JSON.ArrayGet(HistState.messages, a))
+                IfCondition NotEqual(msg, 0) ThenBlock: {
+                    role = JSON.GetString(msg, "role")
+                    IfCondition And(NotEqual(role, 0), EqualTo(StringCompare(role, "assistant"), 0)) ThenBlock: {
+                        found = 1
+                        BreakLoop
+                    }
+                }
+                a = Add(a, 1)
+            }
+            IfCondition EqualTo(found, 0) ThenBlock: { BreakLoop }
+
+            end = Add(a, 1)
+            WhileLoop LessThan(end, n) {
+                msg2 = JSON.AsObject(JSON.ArrayGet(HistState.messages, end))
+                IfCondition EqualTo(msg2, 0) ThenBlock: { BreakLoop }
+                role2 = JSON.GetString(msg2, "role")
+                IfCondition EqualTo(role2, 0) ThenBlock: { BreakLoop }
+                // OpenAI: role=tool. Anthropic: role=user with array content
+                // (tool_result blocks). Keep the pair with this assistant.
+                IfCondition EqualTo(StringCompare(role2, "tool"), 0) ThenBlock: {
+                    end = Add(end, 1)
+                    ContinueLoop
+                }
+                IfCondition EqualTo(StringCompare(role2, "user"), 0) ThenBlock: {
+                    content_arr = JSON.GetArray(msg2, "content")
+                    IfCondition NotEqual(content_arr, 0) ThenBlock: {
+                        end = Add(end, 1)
+                        ContinueLoop
+                    }
+                }
+                BreakLoop
+            }
+
+            // Bundle includes the last message — that is the final reply.
+            IfCondition GreaterEqual(end, n) ThenBlock: { BreakLoop }
+
+            drop_n = Subtract(end, a)
+            IfCondition LessEqual(drop_n, 0) ThenBlock: { BreakLoop }
+            History_DropRange(a, drop_n)
+            PrintMessage("[history] evicted completed bundle of ")
+            PrintNumber(drop_n)
+            PrintMessage(" message(s)\n")
+        }
+    }
+}
+
+// Heap-copy a string. Never nest this inside JSON.SetString(...) —
+// AILang register clobber drops sibling keys (e.g. role).
+Function.History_Own {
+    Input: src: Address
+    Output: Address
+    Body: {
+        IfCondition EqualTo(src, 0) ThenBlock: { ReturnValue(0) }
+        n = StringLength(src)
+        dst = Allocate(Add(n, 1))
+        MemoryCopy(dst, src, n)
+        SetByte(dst, n, 0)
+        ReturnValue(dst)
+    }
+}
+
+Function.History_SetStr {
+    Input: msg: Address
+    Input: key: Address
+    Input: value: Address
+    Body: {
+        owned = History_Own(value)
+        JSON.SetString(msg, key, owned)
+    }
+}
+
+Function.History_FreeDropped {
+    Input: arr: Address
+    Input: start: Integer
+    Input: n: Integer
+    Body: {
+        IfCondition Or(EqualTo(arr, 0), LessEqual(n, 0)) ThenBlock: { ReturnValue(0) }
+        i = start
+        end = Add(start, n)
+        total = JSON.ArrayLength(arr)
+        IfCondition GreaterThan(end, total) ThenBlock: { end = total }
+        WhileLoop LessThan(i, end) {
+            JSON.Free(JSON.ArrayGet(arr, i))
+            i = Add(i, 1)
+        }
+    }
+}
+
 // =============================================================================
 // APPENDERS
 // =============================================================================
 
 // {role: "user", content: "<text>"}
-// JSON.SetString aliases `text`. Callers must pass a stable buffer
-// (not the TUI input_buf unless they CC_StrDup first; not a buffer
-// they Deallocate after this returns).
+// Copies `text` and the role name onto the heap so eviction can JSON.Free.
 Function.History.AppendUser {
     Input: text: Address
     Body: {
         History_EvictIfNeeded()
         msg = JSON.NewObject()
-        JSON.SetString(msg, "role", "user")
-        JSON.SetString(msg, "content", text)
+        History_SetStr(msg, "role", "user")
+        History_SetStr(msg, "content", text)
         JSON.PushObject(HistState.messages, msg)
         HistState.count = Add(HistState.count, 1)
     }
@@ -184,8 +320,8 @@ Function.History.AppendAssistantText {
     Body: {
         History_EvictIfNeeded()
         msg = JSON.NewObject()
-        JSON.SetString(msg, "role", "assistant")
-        JSON.SetString(msg, "content", text)
+        History_SetStr(msg, "role", "assistant")
+        History_SetStr(msg, "content", text)
         JSON.PushObject(HistState.messages, msg)
         HistState.count = Add(HistState.count, 1)
     }
@@ -198,7 +334,7 @@ Function.History.AppendAssistantBlocks {
     Body: {
         History_EvictIfNeeded()
         msg = JSON.NewObject()
-        JSON.SetString(msg, "role", "assistant")
+        History_SetStr(msg, "role", "assistant")
         JSON.SetArray(msg, "content", blocks_arr)
         JSON.PushObject(HistState.messages, msg)
         HistState.count = Add(HistState.count, 1)
@@ -212,7 +348,7 @@ Function.History.AppendToolResults {
     Body: {
         History_EvictIfNeeded()
         msg = JSON.NewObject()
-        JSON.SetString(msg, "role", "user")
+        History_SetStr(msg, "role", "user")
         JSON.SetArray(msg, "content", blocks_arr)
         JSON.PushObject(HistState.messages, msg)
         HistState.count = Add(HistState.count, 1)
@@ -300,9 +436,9 @@ Function.History.LoadFromJSON {
             JSON.Free(parsed)
             ReturnValue(0)
         }
-        // Do not JSON.Free the previous array: Append* stored string
-        // literals ("user", "assistant", "tool") via JSON.SetString,
-        // which aliases. Free would Deallocate those literals.
+        IfCondition NotEqual(HistState.messages, 0) ThenBlock: {
+            History_FreeDropped(HistState.messages, 0, JSON.ArrayLength(HistState.messages))
+        }
         HistState.messages = arr
         HistState.count = JSON.ArrayLength(arr)
         ReturnValue(1)
@@ -311,8 +447,9 @@ Function.History.LoadFromJSON {
 
 Function.History.Clear {
     Body: {
-        // Same aliasing rule as LoadFromJSON — leak the old array
-        // rather than JSON.Free trees that hold string literals.
+        IfCondition NotEqual(HistState.messages, 0) ThenBlock: {
+            History_FreeDropped(HistState.messages, 0, JSON.ArrayLength(HistState.messages))
+        }
         HistState.messages = JSON.NewArray()
         HistState.count = 0
     }

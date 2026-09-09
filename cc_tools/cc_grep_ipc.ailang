@@ -8,7 +8,7 @@
 // Schema: pattern (required), path (required), context (int, default 2),
 //         recursive (int, default 0), fixed (int, default 0),
 //         ignore_case (int, default 0), include (string, optional),
-//         max_results (int, default 200)
+//         max_results (int, default 0 = unlimited; per-file like grep -m)
 //
 // Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. SCSL.
 
@@ -39,8 +39,8 @@ FixedPool.CCGrepConst {
     "MAX_PATTERNS": Initialize=256
     "BUF_SIZE":     Initialize=1048576
     "LINE_MAX":     Initialize=4096
-    "RESULT_CAP":   Initialize=65536
-    "MAX_RESULTS":  Initialize=200
+    "RESULT_CAP":   Initialize=524288
+    "MAX_RESULTS":  Initialize=0
     "DIRBUF_SIZE":  Initialize=32768
     "MAX_DEPTH":    Initialize=20
     "MAX_CTX":      Initialize=10
@@ -68,7 +68,7 @@ FixedPool.CCGrepState {
     "result_buf":   Initialize=0,   CanChange=True
     "result_pos":   Initialize=0,   CanChange=True
     "match_count":  Initialize=0,   CanChange=True
-    "max_results":  Initialize=200, CanChange=True
+    "max_results":  Initialize=0,   CanChange=True
     "truncated":    Initialize=0,   CanChange=True
 }
 
@@ -198,12 +198,12 @@ Function.CCGrep_PushRing {
 
         IfCondition LessThan(CCGrepCtx.ring_count, cap) ThenBlock: {
             slot_idx = Add(CCGrepCtx.ring_head, CCGrepCtx.ring_count)
-            slot_idx = Modulo(slot_idx, CCGrepConst.MAX_CTX)
+            slot_idx = Modulo(slot_idx, cap)
             CCGrepCtx.ring_count = Add(CCGrepCtx.ring_count, 1)
         } ElseBlock: {
             slot_idx = CCGrepCtx.ring_head
             CCGrepCtx.ring_head = Add(CCGrepCtx.ring_head, 1)
-            CCGrepCtx.ring_head = Modulo(CCGrepCtx.ring_head, CCGrepConst.MAX_CTX)
+            CCGrepCtx.ring_head = Modulo(CCGrepCtx.ring_head, cap)
         }
 
         slot = Add(CCGrepCtx.ring_slots, Multiply(slot_idx, CCGrepConst.LINE_SLOT))
@@ -220,10 +220,13 @@ Function.CCGrep_PushRing {
 Function.CCGrep_EmitRing {
     Input: label: Address
     Body: {
+        wrap = GrepConfig.before_ctx
+        IfCondition LessThan(wrap, 1) ThenBlock: { wrap = 1 }
+        IfCondition GreaterThan(wrap, CCGrepConst.MAX_CTX) ThenBlock: { wrap = CCGrepConst.MAX_CTX }
         i = 0
         WhileLoop LessThan(i, CCGrepCtx.ring_count) {
             slot_idx = Add(CCGrepCtx.ring_head, i)
-            slot_idx = Modulo(slot_idx, CCGrepConst.MAX_CTX)
+            slot_idx = Modulo(slot_idx, wrap)
             slot = Add(CCGrepCtx.ring_slots, Multiply(slot_idx, CCGrepConst.LINE_SLOT))
             slen = Dereference(Add(CCGrepCtx.ring_lens, Multiply(slot_idx, 8)))
             sno  = Dereference(Add(CCGrepCtx.ring_nos,  Multiply(slot_idx, 8)))
@@ -397,7 +400,9 @@ Function.RegexLineSearch {
         }
         IfCondition EqualTo(Patterns.dfa_ok, 1) ThenBlock: {
             d = Regex_DFASearch(scratch, line_len)
-            IfCondition GreaterEqual(d, 0) ThenBlock: { ReturnValue(d) }
+            // DFASearch: 1 = match, 0 = no match, -1 = overflow (fall through).
+            IfCondition GreaterThan(d, 0) ThenBlock: { ReturnValue(1) }
+            IfCondition EqualTo(d, 0) ThenBlock: { ReturnValue(0) }
         }
         ReturnValue(Regex_Search(handle, scratch, line_len))
     }
@@ -432,11 +437,14 @@ Function.Match_RegexPrefixBM {
 Function.Match_RegexDFA {
     Input: line: Address
     Input: line_len: Integer
+    Input: pi: Integer
     Output: Integer
     Body: {
         d = Regex_DFASearch(line, line_len)
-        IfCondition GreaterEqual(d, 0) ThenBlock: { ReturnValue(1) }
-        ReturnValue(0)
+        // 1 = match, 0 = no match, -1 = DFA overflow → NFA.
+        IfCondition GreaterThan(d, 0) ThenBlock: { ReturnValue(1) }
+        IfCondition EqualTo(d, 0) ThenBlock: { ReturnValue(0) }
+        ReturnValue(Match_RegexNFA(line, line_len, pi))
     }
 }
 
@@ -447,6 +455,7 @@ Function.Match_RegexNFA {
     Output: Integer
     Body: {
         rhandle = Dereference(Add(Patterns.regex, Multiply(pi, 8)))
+        IfCondition EqualTo(rhandle, 0) ThenBlock: { ReturnValue(0) }
         ReturnValue(Regex_Search(rhandle, line, line_len))
     }
 }
@@ -467,6 +476,7 @@ Function.Match_RegexInsensitive {
             si = Add(si, 1)
         }
         SetByte(Scratch.rx_lc, line_len, 0)
+        IfCondition EqualTo(rhandle, 0) ThenBlock: { ReturnValue(0) }
         ReturnValue(RegexLineSearch(rhandle, Scratch.rx_lc, line_len, rx_pfx, rx_pfx_len, rx_pfx_bc))
     }
 }
@@ -572,7 +582,7 @@ Function.LineMatches {
                 Case 1: { hit = Match_WholeLine(line, line_len, pi) }
                 Case 2: { hit = Match_WordMatch(line, line_len, pi) }
                 Case 3: { hit = Match_RegexPrefixBM(line, line_len, pi) }
-                Case 4: { hit = Match_RegexDFA(line, line_len) }
+                Case 4: { hit = Match_RegexDFA(line, line_len, pi) }
                 Case 5: { hit = Match_RegexNFA(line, line_len, pi) }
                 Case 6: { hit = Match_RegexInsensitive(line, line_len, pi) }
                 Case 7: { hit = Match_LiteralBM(line, line_len, pi) }
@@ -595,17 +605,35 @@ Function.CCGrep_FreePatterns {
         WhileLoop LessThan(i, Patterns.count) {
             p = Dereference(Add(Patterns.ptrs, Multiply(i, 8)))
             plen = Dereference(Add(Patterns.lens, Multiply(i, 8)))
-            IfCondition NotEqual(p, 0) ThenBlock: { Deallocate(p, Add(plen, 1)) }
+            IfCondition NotEqual(p, 0) ThenBlock: {
+                Deallocate(p, Add(plen, 1))
+                StoreValue(Add(Patterns.ptrs, Multiply(i, 8)), 0)
+            }
             l = Dereference(Add(Patterns.lc_ptrs, Multiply(i, 8)))
-            IfCondition NotEqual(l, 0) ThenBlock: { Deallocate(l, Add(plen, 1)) }
+            IfCondition NotEqual(l, 0) ThenBlock: {
+                Deallocate(l, Add(plen, 1))
+                StoreValue(Add(Patterns.lc_ptrs, Multiply(i, 8)), 0)
+            }
             r = Dereference(Add(Patterns.regex, Multiply(i, 8)))
-            IfCondition NotEqual(r, 0) ThenBlock: { Regex_Free(r) }
+            IfCondition NotEqual(r, 0) ThenBlock: {
+                Regex_Free(r)
+                StoreValue(Add(Patterns.regex, Multiply(i, 8)), 0)
+            }
             b = Dereference(Add(Patterns.bc_tables, Multiply(i, 8)))
-            IfCondition NotEqual(b, 0) ThenBlock: { Deallocate(b, 256) }
+            IfCondition NotEqual(b, 0) ThenBlock: {
+                Deallocate(b, 256)
+                StoreValue(Add(Patterns.bc_tables, Multiply(i, 8)), 0)
+            }
             pfx = Dereference(Add(Patterns.rx_prefix, Multiply(i, 8)))
-            IfCondition NotEqual(pfx, 0) ThenBlock: { Deallocate(pfx, 32) }
+            IfCondition NotEqual(pfx, 0) ThenBlock: {
+                Deallocate(pfx, 32)
+                StoreValue(Add(Patterns.rx_prefix, Multiply(i, 8)), 0)
+            }
             pbc = Dereference(Add(Patterns.rx_prefix_bc, Multiply(i, 8)))
-            IfCondition NotEqual(pbc, 0) ThenBlock: { Deallocate(pbc, 256) }
+            IfCondition NotEqual(pbc, 0) ThenBlock: {
+                Deallocate(pbc, 256)
+                StoreValue(Add(Patterns.rx_prefix_bc, Multiply(i, 8)), 0)
+            }
             i = Add(i, 1)
         }
         Patterns.count = 0
@@ -834,7 +862,8 @@ Function.CCGrep_ProcessStream {
                         CCGrepCtx.after_rem = GrepConfig.after_ctx
                         match_count = Add(match_count, 1)
                         CCGrepState.match_count = Add(CCGrepState.match_count, 1)
-                        IfCondition GreaterEqual(CCGrepState.match_count, CCGrepState.max_results) ThenBlock: {
+                        // max_results=0 → unlimited. Otherwise per-file, like grep -m.
+                        IfCondition And(GreaterThan(CCGrepState.max_results, 0), GreaterEqual(match_count, CCGrepState.max_results)) ThenBlock: {
                             stop_early = 1
                         }
                         IfCondition GreaterThan(CCGrepState.truncated, 0) ThenBlock: {
@@ -912,7 +941,7 @@ Function.CCGrep_ProcessDir {
     Input: depth: Integer
     Body: {
         IfCondition GreaterThan(depth, CCGrepConst.MAX_DEPTH) ThenBlock: { ReturnValue(0) }
-        IfCondition GreaterEqual(CCGrepState.match_count, CCGrepState.max_results) ThenBlock: { ReturnValue(0) }
+        IfCondition GreaterThan(CCGrepState.truncated, 0) ThenBlock: { ReturnValue(0) }
 
         oflags = BitwiseOr(CCGrepSys.O_RDONLY, CCGrepSys.O_DIRECTORY)
         dir_fd = SystemCall(CCGrepSys.SYS_OPENAT, CCGrepSys.AT_FDCWD, path, oflags, 0, 0)
@@ -923,12 +952,12 @@ Function.CCGrep_ProcessDir {
         child_buf = Allocate(4096)
 
         WhileLoop 1 {
-            IfCondition GreaterEqual(CCGrepState.match_count, CCGrepState.max_results) ThenBlock: { BreakLoop }
+            IfCondition GreaterThan(CCGrepState.truncated, 0) ThenBlock: { BreakLoop }
             n = SystemCall(CCGrepSys.SYS_GETDENTS64, dir_fd, dirbuf, CCGrepConst.DIRBUF_SIZE)
             IfCondition LessEqual(n, 0) ThenBlock: { BreakLoop }
             pos = 0
             WhileLoop LessThan(pos, n) {
-                IfCondition GreaterEqual(CCGrepState.match_count, CCGrepState.max_results) ThenBlock: { BreakLoop }
+                IfCondition GreaterThan(CCGrepState.truncated, 0) ThenBlock: { BreakLoop }
                 entry  = Add(dirbuf, pos)
                 reclen = Add(GetByte(entry, 16), Multiply(GetByte(entry, 17), 256))
                 IfCondition EqualTo(reclen, 0) ThenBlock: { BreakLoop }
@@ -937,9 +966,8 @@ Function.CCGrep_ProcessDir {
                 d0 = GetByte(dname, 0)
                 d1 = GetByte(dname, 1)
                 skip = 0
-                IfCondition EqualTo(d0, 46) ThenBlock: {
-                    IfCondition Or(EqualTo(d1, 0), EqualTo(d1, 46)) ThenBlock: { skip = 1 }
-                }
+                IfCondition EqualTo(d0, 46) ThenBlock: { skip = 1 }
+                IfCondition EqualTo(StringCompare(dname, "__pycache__"), 0) ThenBlock: { skip = 1 }
                 IfCondition EqualTo(skip, 0) ThenBlock: {
                     dname_len = StringLength(dname)
                     MemoryCopy(child_buf, path, path_len)
@@ -991,7 +1019,7 @@ Function.CCGrep_BuildSchema {
         UtilArgs_AddField(s, "fixed",       "int",    0, "1 = treat pattern as literal string (no regex)", "fixed")
         UtilArgs_AddField(s, "ignore_case", "int",    0, "1 = case-insensitive match", "ignore_case")
         UtilArgs_AddField(s, "include",     "string", 0, "Filename glob filter e.g. *.ailang (only with recursive=1)", "include")
-        UtilArgs_AddField(s, "max_results", "int",    0, "Max matching lines returned (default 200)", "max_results")
+        UtilArgs_AddField(s, "max_results", "int",    0, "Max matching lines per file (0 = unlimited, like grep -m)", "max_results")
         UtilArgs_AddField(s, "invert",      "int",    0, "1 = return non-matching lines (-v)", "invert")
         UtilArgs_AddField(s, "word_match",  "int",    0, "1 = match whole words only (-w)", "word_match")
         UtilArgs_AddField(s, "whole_line",  "int",    0, "1 = match whole line only (-x)", "whole_line")
@@ -999,7 +1027,7 @@ Function.CCGrep_BuildSchema {
         UtilArgs_SetDefault(s, "recursive",   "0")
         UtilArgs_SetDefault(s, "fixed",       "0")
         UtilArgs_SetDefault(s, "ignore_case", "0")
-        UtilArgs_SetDefault(s, "max_results", "200")
+        UtilArgs_SetDefault(s, "max_results", "0")
         UtilArgs_SetDefault(s, "invert",      "0")
         UtilArgs_SetDefault(s, "word_match",  "0")
         UtilArgs_SetDefault(s, "whole_line",  "0")
@@ -1047,6 +1075,21 @@ Function.CCGrep_SendSchema {
         JSON.SetString(resp, "method", "schema_response")
         IfCondition NotEqual(schema_obj, 0) ThenBlock: { JSON.SetObject(resp, "schema", schema_obj) }
         Socket.SendMsg(client_fd, JSON.SerializeObject(resp))
+    }
+}
+
+// Int fields are JSON numbers after ParseIPC. GetString is a no-op on them
+// (returns 0), which is why every flag except recursive was ignored.
+Function.CCGrep_ArgInt {
+    Input: args: Address
+    Input: name: Address
+    Output: Integer
+    Body: {
+        v = UtilArgs_GetInt(args, name)
+        IfCondition NotEqual(v, 0) ThenBlock: { ReturnValue(v) }
+        s = UtilArgs_GetString(args, name)
+        IfCondition EqualTo(s, 0) ThenBlock: { ReturnValue(0) }
+        ReturnValue(StringToInt(s))
     }
 }
 
@@ -1103,7 +1146,7 @@ Function.CCGrep_HandleRequest {
             CCGrepState.result_pos      = 0
             CCGrepState.match_count     = 0
             CCGrepState.truncated       = 0
-            CCGrepState.max_results     = CCGrepConst.MAX_RESULTS
+            CCGrepState.max_results     = 0
             CCGrep_FreePatterns()
             Patterns.longest            = 0
             Patterns.dfa_ok             = 0
@@ -1113,54 +1156,23 @@ Function.CCGrep_HandleRequest {
             CCGrepCtx.after_rem         = 0
             CCGrepCtx.prev_end          = 0
 
-            // Apply options
-            ctx_str = UtilArgs_GetString(validated, "context")
-            IfCondition NotEqual(ctx_str, 0) ThenBlock: {
-                cv = StringToInt(ctx_str)
-                IfCondition GreaterThan(cv, 0) ThenBlock: {
-                    IfCondition GreaterThan(cv, CCGrepConst.MAX_CTX) ThenBlock: { cv = CCGrepConst.MAX_CTX }
-                    GrepConfig.before_ctx = cv
-                    GrepConfig.after_ctx  = cv
-                }
+            // Apply options — int fields via GetInt (GetString is a no-op on them).
+            cv = CCGrep_ArgInt(validated, "context")
+            IfCondition GreaterThan(cv, 0) ThenBlock: {
+                IfCondition GreaterThan(cv, CCGrepConst.MAX_CTX) ThenBlock: { cv = CCGrepConst.MAX_CTX }
+                GrepConfig.before_ctx = cv
+                GrepConfig.after_ctx  = cv
             }
-            fixed_str = UtilArgs_GetString(validated, "fixed")
-            IfCondition NotEqual(fixed_str, 0) ThenBlock: {
-                IfCondition EqualTo(StringToInt(fixed_str), 1) ThenBlock: { GrepConfig.fixed = 1 }
-            }
-            ic_str = UtilArgs_GetString(validated, "ignore_case")
-            IfCondition NotEqual(ic_str, 0) ThenBlock: {
-                IfCondition EqualTo(StringToInt(ic_str), 1) ThenBlock: { GrepConfig.case_insensitive = 1 }
-            }
-            inv_str = UtilArgs_GetString(validated, "invert")
-            IfCondition NotEqual(inv_str, 0) ThenBlock: {
-                IfCondition EqualTo(StringToInt(inv_str), 1) ThenBlock: { GrepConfig.invert = 1 }
-            }
-            wm_str = UtilArgs_GetString(validated, "word_match")
-            IfCondition NotEqual(wm_str, 0) ThenBlock: {
-                IfCondition EqualTo(StringToInt(wm_str), 1) ThenBlock: { GrepConfig.word_match = 1 }
-            }
-            wl_str = UtilArgs_GetString(validated, "whole_line")
-            IfCondition NotEqual(wl_str, 0) ThenBlock: {
-                IfCondition EqualTo(StringToInt(wl_str), 1) ThenBlock: { GrepConfig.whole_line = 1 }
-            }
-            // UtilArgs_GetInt reads the JSON number directly — works for integer 1 from the model.
-            // JSON.GetBool only matches JSON booleans (true/false), not integers, so it was
-            // always returning 0 for "recursive": 1, causing the "is a directory" false error.
-            IfCondition GreaterThan(UtilArgs_GetInt(validated, "recursive"), 0) ThenBlock: { GrepConfig.recursive = 1 }
-            // Fallback: model may send as string "1" (UtilArgs_GetString is a no-op for int fields)
-            IfCondition EqualTo(GrepConfig.recursive, 0) ThenBlock: {
-                rec_str = UtilArgs_GetString(validated, "recursive")
-                IfCondition NotEqual(rec_str, 0) ThenBlock: {
-                    IfCondition EqualTo(StringToInt(rec_str), 1) ThenBlock: { GrepConfig.recursive = 1 }
-                }
-            }
+            IfCondition GreaterThan(CCGrep_ArgInt(validated, "fixed"), 0) ThenBlock: { GrepConfig.fixed = 1 }
+            IfCondition GreaterThan(CCGrep_ArgInt(validated, "ignore_case"), 0) ThenBlock: { GrepConfig.case_insensitive = 1 }
+            IfCondition GreaterThan(CCGrep_ArgInt(validated, "invert"), 0) ThenBlock: { GrepConfig.invert = 1 }
+            IfCondition GreaterThan(CCGrep_ArgInt(validated, "word_match"), 0) ThenBlock: { GrepConfig.word_match = 1 }
+            IfCondition GreaterThan(CCGrep_ArgInt(validated, "whole_line"), 0) ThenBlock: { GrepConfig.whole_line = 1 }
+            IfCondition GreaterThan(CCGrep_ArgInt(validated, "recursive"), 0) ThenBlock: { GrepConfig.recursive = 1 }
             inc_str = UtilArgs_GetString(validated, "include")
             IfCondition NotEqual(inc_str, 0) ThenBlock: { GrepConfig.include_pat = inc_str }
-            mr_str = UtilArgs_GetString(validated, "max_results")
-            IfCondition NotEqual(mr_str, 0) ThenBlock: {
-                mr = StringToInt(mr_str)
-                IfCondition GreaterThan(mr, 0) ThenBlock: { CCGrepState.max_results = mr }
-            }
+            mr = CCGrep_ArgInt(validated, "max_results")
+            IfCondition GreaterThan(mr, 0) ThenBlock: { CCGrepState.max_results = mr }
 
             // Add pattern and compile
             CCGrep_AddPattern(pattern)
@@ -1217,6 +1229,7 @@ Function.CCGrep_HandleRequest {
             IfCondition EqualTo(CCGrepState.match_count, 0) ThenBlock: { content = "(no matches)" }
 
             CCGrep_SendResult(client_fd, id, content, CCGrepState.truncated)
+            CCGrep_FreePatterns()
             JSON.Free(parsed)
             ReturnValue(0)
         }

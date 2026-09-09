@@ -1176,10 +1176,13 @@ Function.CC_RunTurn {
                 }
                 IfCondition EqualTo(steering, 1) ThenBlock: {
                     dummy = JSON.NewObject()
-                    JSON.SetString(dummy, "role", "assistant")
-                    JSON.SetString(dummy, "content", "[System: Awaiting user steering]")
+                    dummy_role = CC_StrDup("assistant")
+                    dummy_text = CC_StrDup("[System: Awaiting user steering]")
+                    JSON.SetString(dummy, "role", dummy_role)
+                    JSON.SetString(dummy, "content", dummy_text)
                     IfCondition NotEqual(SelectedProvider.reasoning_effort, 0) ThenBlock: {
-                        JSON.SetString(dummy, "reasoning_content", "")
+                        dummy_rc = CC_StrDup("")
+                        JSON.SetString(dummy, "reasoning_content", dummy_rc)
                     }
                     History.AppendRaw(dummy)
                     
@@ -1196,6 +1199,7 @@ Function.CC_RunTurn {
             retry_count = 0
             request_ok = 0
             permanent_fail = 0
+            is_interrupted_turn = 0
             retry_delay_ms = 2000
 
             WhileLoop And(And(LessThan(retry_count, max_retries), EqualTo(request_ok, 0)), EqualTo(permanent_fail, 0)) {
@@ -1205,6 +1209,10 @@ Function.CC_RunTurn {
 
             messages = History.GetMessagesArray()
             tools = IPCDispatch.GetToolSchemasArray()
+            IfCondition EqualTo(CCRunState.line_buf, 0) ThenBlock: {
+                CCRunState.line_buf = Allocate(CCConst.LINE_BUF_SZ)
+            }
+            Arena_ScratchBegin()
             body = Backend.BuildRequest(messages, tools)
             CC_LogStageMemory("AFTER_BUILD_REQUEST")
 
@@ -1235,7 +1243,10 @@ Function.CC_RunTurn {
             CC_DebugLog("\n---\n")
             Deallocate(dbg_body_buf, Add(dbg_body_len, 1))
 
-            IfCondition EqualTo(body, 0) ThenBlock: { BreakLoop }
+            IfCondition EqualTo(body, 0) ThenBlock: {
+                Arena_ScratchEnd()
+                BreakLoop
+            }
             url = Backend.GetURL()
 
             base_headers = Backend.BuildHeaders()
@@ -1263,6 +1274,7 @@ Function.CC_RunTurn {
 
             handle = HTTP.PostStream(url, headers, body, 10000, 900000)
             IfCondition EqualTo(handle, 0) ThenBlock: {
+                Arena_ScratchEnd()
                 CC_DebugLog("HTTP.PostStream FAILED (curl spawn error).\n")
                 UI.ChatTag("✗", "HTTP request failed (curl spawn)", 1)
                 CC_SleepAnimated(CC_RandomMs(retry_delay_ms))
@@ -1370,10 +1382,8 @@ Function.CC_RunTurn {
 
             HTTP.CloseStream(handle)
             Deallocate(sse_state, CCConst.SSE_STATE_SZ)
-            // Free the request body. It is a StringConcat result (JSON serialize),
-            // so its arena allocation size is StringLength+1. Without this the
-            // ~300-500KB body leaks on every request (never reclaimed by the arena).
             Deallocate(body, Add(StringLength(body), 1))
+            Arena_ScratchEnd()
 
             // Check if the backend saw a finish_reason before the connection dropped
             IfCondition EqualTo(clean_stop, 0) ThenBlock: {
@@ -1568,10 +1578,10 @@ Function.CC_RunTurn {
                                 IfCondition EqualTo(park_failed, 0) ThenBlock: {
                                     CC_DebugLog("Parked large tool output to Pgmem.\n")
                                     nbytes = NumberToString(StringLength(content))
-                                    stub = StringConcat("[Output parked to memory (", nbytes)
-                                    stub = StringConcat(stub, " bytes). Key: ")
+                                    stub = StringConcat("[parked ", nbytes)
+                                    stub = StringConcat(stub, " bytes key=")
                                     stub = StringConcat(stub, park_key)
-                                    stub = StringConcat(stub, ". Call Pgmem with {\"op\":\"search\",\"query\":\"<text>\"} to search it. Avoid op=\"pickup\" to prevent context overflow.]")
+                                    stub = StringConcat(stub, "]")
                                     content = stub
                                 } ElseBlock: {
                                     CC_DebugLog("Pgmem parking FAILED. Truncating output.\n")
@@ -1640,6 +1650,15 @@ Function.CC_RunTurn {
                     CC_DebugLog("No tools requested. Turn complete.\n")
                     Backend.Reset()
                     UI.SetReasoning("")
+                    History.EvictCompletedTurns()
+                    CC_LogStageMemory("AFTER_EVICT_COMPLETED")
+                    IfCondition EqualTo(UI.HasInterrupt(), 1) ThenBlock: {
+                        steer = UI.ConsumeInterrupt()
+                        IfCondition And(NotEqual(steer, 0), GreaterThan(StringLength(steer), 0)) ThenBlock: {
+                            History.AppendUser(steer)
+                            keep_going = 1
+                        }
+                    }
                 }
             } ElseBlock: {
                 IfCondition EqualTo(is_interrupted_turn, 1) ThenBlock: {
@@ -2769,9 +2788,10 @@ Function.CC_RunAuth {
 Function.CC_RegisterOneTool {
     Input: name: Address
     Input: path: Address
+    Input: binary: Address
     Body: {
         CC_WriteStdout("   [Wait] ") CC_WriteStdout(name) CC_WriteStdout("...")
-        res = IPCDispatch.RegisterTool(name, path)
+        res = IPCDispatch.RegisterTool(name, path, binary)
         // Carriage return + ANSI Erase Line
         buf = Allocate(16)
         SetByte(buf,0,13) SetByte(buf,1,27) SetByte(buf,2,91) SetByte(buf,3,50) SetByte(buf,4,75) SetByte(buf,5,0)
@@ -2850,11 +2870,12 @@ Function.CC_LoadManifest {
             IfCondition NotEqual(eo, 0) ThenBlock: {
                 tool_name   = JSON.GetString(eo, "name")
                 tool_socket = JSON.GetString(eo, "socket")
+                bin         = JSON.GetString(eo, "binary")
                 IfCondition And(NotEqual(tool_name, 0), NotEqual(tool_socket, 0)) ThenBlock: {
                     IfCondition EqualTo(do_launch, 1) ThenBlock: {
-                        CC_RegisterOneTool(tool_name, tool_socket)
+                        CC_RegisterOneTool(tool_name, tool_socket, bin)
                     } ElseBlock: {
-                        IPCDispatch.RegisterTool(tool_name, tool_socket)
+                        IPCDispatch.RegisterTool(tool_name, tool_socket, bin)
                     }
                 }
             }
@@ -3017,9 +3038,10 @@ Function.CC_ChatLoop {
 
             IfCondition And(EqualTo(paste_active, 0), GreaterThan(paste_used, 0)) ThenBlock: {
                 SetByte(paste_buf, paste_used, 0)
-                CC_SessionLogUser(paste_buf)
-                History.AppendUser(paste_buf)
+                paste_copy = CC_StrDup(paste_buf)
                 paste_used = 0
+                CC_SessionLogUser(paste_copy)
+                History.AppendUser(paste_copy)
                 CC_RunTurn()
                 CC_SaveSessionToPgmem()
                 ContinueLoop
@@ -4264,7 +4286,7 @@ Function.CC_MCP_BootSchemas {
                     // Launch worker, register schema, kill worker
                     pid = CC_LaunchTool(bin, tnam, tsoc)
                     IfCondition GreaterThan(pid, 0) ThenBlock: {
-                        IPCDispatch.RegisterTool(tnam, tsoc)
+                        IPCDispatch.RegisterTool(tnam, tsoc, bin)
                         // Kill this worker — we only needed its schema
                         SystemCall(CCSys.SYS_KILL, pid, CCSys.SIGTERM, 0, 0, 0)
                         _ws = Allocate(8)

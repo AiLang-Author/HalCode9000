@@ -971,20 +971,20 @@ Function.UI_ScrollForward {
 
 // Scroll the chat region up by one line: copy each row [chat_top+1..chat_bot]
 // to row-1, clear chat_bot. Uses ESC[<top>;<bot>r scroll region + IND.
+Function.UI_EnsureChatScrollRegion {
+    Body: {
+        TUI_SetScrollRegion(UILayout.chat_top, UILayout.chat_bot)
+    }
+}
+
 Function.UI_ScrollChatUp {
     Body: {
-        IfCondition EqualTo(UILayout.streaming, 1) ThenBlock: {
-            // Scroll region is active — newline at chat_bot scrolls only the chat area.
-            TUI_MoveTo(UILayout.chat_bot, UILayout.chat_x)
-            TUI_BufferChar(10)
-            TUI_MoveTo(UILayout.chat_bot, UILayout.chat_x)
-        } ElseBlock: {
-            // No scroll region during idle — use full-screen scroll approach.
-            TUI_MoveTo(Add(UILayout.chat_bot, 1), 1)
-            TUI_BufferChar(27) TUI_BufferWriteStr("[J")
-            TUI_BufferChar(27) TUI_BufferWriteStr("[999;1H")
-            TUI_BufferChar(10)
-        }
+        // Always scroll inside the chat region. Full-screen IND was smashing
+        // the pinned prompt and mixing user/bot rows.
+        UI_EnsureChatScrollRegion()
+        TUI_MoveTo(UILayout.chat_bot, UILayout.chat_x)
+        TUI_BufferChar(10)
+        TUI_MoveTo(UILayout.chat_bot, UILayout.chat_x)
     }
 }
 
@@ -1000,6 +1000,53 @@ Function.UI_AdvanceChatCursor {
         }
         UILayout.chat_cursor = Add(UILayout.chat_cursor, 1)
         ReturnValue(0)
+    }
+}
+
+Function.UI_ChatEraseEol {
+    Body: {
+        TUI_BufferChar(27)
+        TUI_BufferWriteStr("[K")
+    }
+}
+
+Function.UI_ChatNewLine {
+    Output: Integer
+    Body: {
+        UI_ChatEraseEol()
+        scrolled = UI_AdvanceChatCursor()
+        UILayout.chat_col = UILayout.chat_x
+        TUI_MoveTo(UILayout.chat_cursor, UILayout.chat_x)
+        UI_ChatEraseEol()
+        ReturnValue(scrolled)
+    }
+}
+
+Function.UI_ChatPutByte {
+    Input: ch: Integer
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(ch, 10) ThenBlock: {
+            ReturnValue(UI_ChatNewLine())
+        }
+        is_start = 0
+        IfCondition LessThan(ch, 128) ThenBlock: { is_start = 1 }
+        IfCondition GreaterEqual(ch, 192) ThenBlock: { is_start = 1 }
+        scrolled = 0
+        IfCondition And(EqualTo(is_start, 1), GreaterThan(UILayout.chat_col, UILayout.cols)) ThenBlock: {
+            scrolled = UI_ChatNewLine()
+        }
+        TUI_BufferChar(ch)
+        IfCondition NotEqual(UILayout.line_acc, 0) ThenBlock: {
+            IfCondition LessThan(UILayout.line_acc_pos, 510) ThenBlock: {
+                SetByte(UILayout.line_acc, UILayout.line_acc_pos, ch)
+                UILayout.line_acc_pos = Add(UILayout.line_acc_pos, 1)
+            }
+        }
+        IfCondition EqualTo(is_start, 1) ThenBlock: {
+            UILayout.chat_col = Add(UILayout.chat_col, 1)
+        }
+        ReturnValue(scrolled)
     }
 }
 
@@ -1040,7 +1087,7 @@ Function.UI.ChatPrint {
         }
 
         scrolled_any = 0
-        // RESUME from the column where the previous ChatPrint left off.
+        UI_EnsureChatScrollRegion()
         IfCondition LessThan(UILayout.chat_col, UILayout.chat_x) ThenBlock: {
             UILayout.chat_col = UILayout.chat_x
         }
@@ -1049,49 +1096,14 @@ Function.UI.ChatPrint {
         WhileLoop LessThan(i, n) {
             ch = GetByte(s, i)
             IfCondition EqualTo(ch, 10) ThenBlock: {
-                // Flush accumulated line to ChatLog, then advance cursor
                 IfCondition NotEqual(UILayout.line_acc, 0) ThenBlock: {
                     SetByte(UILayout.line_acc, UILayout.line_acc_pos, 0)
                     ChatLog_Append(97, UILayout.line_acc)
                     UILayout.line_acc_pos = 0
                 }
-                scrolled = UI_AdvanceChatCursor()
-                IfCondition EqualTo(scrolled, 1) ThenBlock: { scrolled_any = 1 }
-                UILayout.chat_col = UILayout.chat_x
-                TUI_MoveTo(UILayout.chat_cursor, UILayout.chat_x)
-            } ElseBlock: {
-                is_start = 0
-                IfCondition LessThan(ch, 128) ThenBlock: { is_start = 1 }
-                IfCondition GreaterEqual(ch, 192) ThenBlock: { is_start = 1 }
-
-                IfCondition And(GreaterThan(UILayout.chat_col, UILayout.cols), EqualTo(is_start, 1)) ThenBlock: {
-                    // Column overflow — flush accumulated line
-                    IfCondition NotEqual(UILayout.line_acc, 0) ThenBlock: {
-                        SetByte(UILayout.line_acc, UILayout.line_acc_pos, 0)
-                        ChatLog_Append(97, UILayout.line_acc)
-                        UILayout.line_acc_pos = 0
-                    }
-                    scrolled = UI_AdvanceChatCursor()
-                    IfCondition EqualTo(scrolled, 1) ThenBlock: { scrolled_any = 1 }
-                    UILayout.chat_col = UILayout.chat_x
-                    TUI_MoveTo(UILayout.chat_cursor, UILayout.chat_x)
-                }
-                // Accumulate printable byte
-                IfCondition NotEqual(UILayout.line_acc, 0) ThenBlock: {
-                    IfCondition LessThan(UILayout.line_acc_pos, 510) ThenBlock: {
-                        SetByte(UILayout.line_acc, UILayout.line_acc_pos, ch)
-                        UILayout.line_acc_pos = Add(UILayout.line_acc_pos, 1)
-                    }
-                }
-                tmp = Allocate(2)
-                SetByte(tmp, 0, ch)
-                SetByte(tmp, 1, 0)
-                TUI_BufferWriteStr(tmp)
-                Deallocate(tmp, 2)
-                IfCondition EqualTo(is_start, 1) ThenBlock: {
-                    UILayout.chat_col = Add(UILayout.chat_col, 1)
-                }
             }
+            did = UI_ChatPutByte(ch)
+            IfCondition EqualTo(did, 1) ThenBlock: { scrolled_any = 1 }
             i = Add(i, 1)
         }
         IfCondition EqualTo(scrolled_any, 1) ThenBlock: {
@@ -1187,31 +1199,42 @@ Function.UI.ChatTag {
         SetByte(log_buf, lp, 0)
         ChatLog_Append(log_role, log_buf)
         Deallocate(log_buf, 512)
+
+        UI_EnsureChatScrollRegion()
+        UILayout.chat_col = UILayout.chat_x
         TUI_MoveTo(UILayout.chat_cursor, UILayout.chat_x)
+        UI_ChatEraseEol()
         TUI_SetFG(color)
-        IfCondition NotEqual(tag, 0) ThenBlock: { TUI_BufferWriteStr(tag) }
+        scrolled_any = 0
+        IfCondition NotEqual(tag, 0) ThenBlock: {
+            _ti = 0
+            WhileLoop 1 {
+                _tc = GetByte(tag, _ti)
+                IfCondition EqualTo(_tc, 0) ThenBlock: { BreakLoop }
+                did = UI_ChatPutByte(_tc)
+                IfCondition EqualTo(did, 1) ThenBlock: { scrolled_any = 1 }
+                _ti = Add(_ti, 1)
+            }
+        }
         TUI_ResetColor()
-        TUI_BufferWriteStr(" ")
-        IfCondition NotEqual(body, 0) ThenBlock: { TUI_BufferWriteStr(body) }
-        // Advance chat_cursor for each embedded newline in the body so multi-line
-        // user messages don't get overwritten by the model's first response line.
+        did = UI_ChatPutByte(32)
+        IfCondition EqualTo(did, 1) ThenBlock: { scrolled_any = 1 }
         IfCondition NotEqual(body, 0) ThenBlock: {
             _bi = 0
             _blen = StringLength(body)
             WhileLoop LessThan(_bi, _blen) {
-                IfCondition EqualTo(GetByte(body, _bi), 10) ThenBlock: {
-                    _bs = UI_AdvanceChatCursor()
-                    UILayout.chat_col = UILayout.chat_x
-                    TUI_MoveTo(UILayout.chat_cursor, UILayout.chat_x)
-                    IfCondition EqualTo(_bs, 1) ThenBlock: { UI_RepaintPromptFrameOnly() }
-                }
+                did = UI_ChatPutByte(GetByte(body, _bi))
+                IfCondition EqualTo(did, 1) ThenBlock: { scrolled_any = 1 }
                 _bi = Add(_bi, 1)
             }
         }
-        scrolled = UI_AdvanceChatCursor()
-        UILayout.chat_col = UILayout.chat_x
-        TUI_MoveTo(UILayout.chat_cursor, UILayout.chat_x)
-        IfCondition EqualTo(scrolled, 1) ThenBlock: { UI_RepaintPromptFrameOnly() }
+        scrolled = UI_ChatNewLine()
+        IfCondition Or(EqualTo(scrolled, 1), EqualTo(scrolled_any, 1)) ThenBlock: { UI_RepaintPromptFrameOnly() }
+        IfCondition EqualTo(color, UIColors.CYAN_FG) ThenBlock: {
+            scrolled = UI_ChatNewLine()
+            IfCondition EqualTo(scrolled, 1) ThenBlock: { UI_RepaintPromptFrameOnly() }
+        }
+        UILayout.line_acc_pos = 0
         TUI_Refresh()
     }
 }
@@ -1487,11 +1510,35 @@ Function.UI.PumpInput {
     }
 }
 
+Function.UI_DrainBareEnters {
+    Input: wait_ms: Integer
+    Body: {
+        IfCondition GreaterThan(wait_ms, 0) ThenBlock: {
+            ts = Allocate(16)
+            StoreValue(ts, 0)
+            StoreValue(Add(ts, 8), Multiply(wait_ms, 1000000))
+            SystemCall(35, ts, 0, 0, 0, 0)
+            Deallocate(ts, 16)
+        }
+        WhileLoop 1 {
+            pfd = Allocate(8)
+            StoreValue(pfd, 0, "dword")
+            StoreValue(Add(pfd, 4), 1, "dword")
+            pr = SystemCall(UISys.SYS_POLL, pfd, 1, 0, 0, 0)
+            Deallocate(pfd, 8)
+            IfCondition LessEqual(pr, 0) ThenBlock: { ReturnValue(0) }
+            key = TUI_GetKey()
+            IfCondition And(NotEqual(key, 10), NotEqual(key, 13)) ThenBlock: { ReturnValue(0) }
+        }
+    }
+}
+
 // Edit the input buffer in place using TUI_GetKey; render each keystroke
 // at the body row. Returns when Enter is pressed.
 Function.UI.ReadLine {
     Output: Address
     Body: {
+        UI_DrainBareEnters(0)
         len = UILayout.input_len
         SetByte(UILayout.input_buf, len, 0)
         UILayout.cursor_col = len   // start with cursor at end of any pre-existing text
@@ -1594,6 +1641,7 @@ Function.UI.ReadLine {
             // Enter
             IfCondition Or(EqualTo(key, 10), EqualTo(key, 13)) ThenBlock: {
                 IfCondition EqualTo(UILayout.in_paste, 0) ThenBlock: {
+                    UI_DrainBareEnters(20)
                     BreakLoop
                 } ElseBlock: {
                     IfCondition LessThan(len, Subtract(UILayout.input_cap, 1)) ThenBlock: {
@@ -1684,36 +1732,23 @@ Function.UI.ReadLine {
             }
         }
 
-        // Echo the submitted line into the chat region as the user's prompt
-        // Count visual lines BEFORE clearing input_len so soft-wrap rows are known
-        _submit_lines = UI_CalcInputLines(UILayout.input_len)
+        // Snapshot then wipe input_buf. History.AppendUser aliases this pointer;
+        // leaving the text in input_buf lets the next ReadLine (or a leftover LF)
+        // submit the same line again.
+        n_out = len
+        out = Allocate(Add(n_out, 1))
+        MemoryCopy(out, UILayout.input_buf, n_out)
+        SetByte(out, n_out, 0)
         UILayout.input_len = 0
         UILayout.cursor_col = 0
+        SetByte(UILayout.input_buf, 0, 0)
         UI_AdjustPromptHeight(1)
         TUI_HideCursor()
-        UI_DrawTurnSeparator()
-        UI.ChatTag("›", UILayout.input_buf, UIColors.CYAN_FG)
-        // ChatTag already advanced for each embedded \n + 1 final.
-        // Advance extra rows for visual soft-wraps so agent reply starts below all wrapped rows.
-        _nl_cnt = 0
-        _nl_i = 0
-        _nl_buf_len = StringLength(UILayout.input_buf)
-        WhileLoop LessThan(_nl_i, _nl_buf_len) {
-            IfCondition EqualTo(GetByte(UILayout.input_buf, _nl_i), 10) ThenBlock: {
-                _nl_cnt = Add(_nl_cnt, 1)
-            }
-            _nl_i = Add(_nl_i, 1)
+        IfCondition GreaterThan(n_out, 0) ThenBlock: {
+            UI_DrawTurnSeparator()
+            UI.ChatTag("›", out, UIColors.CYAN_FG)
         }
-        _wrap_extra = Subtract(_submit_lines, Add(_nl_cnt, 1))
-        _wi = 0
-        WhileLoop LessThan(_wi, _wrap_extra) {
-            _ws = UI_AdvanceChatCursor()
-            UILayout.chat_col = UILayout.chat_x
-            TUI_MoveTo(UILayout.chat_cursor, UILayout.chat_x)
-            IfCondition EqualTo(_ws, 1) ThenBlock: { UI_RepaintPromptFrameOnly() }
-            _wi = Add(_wi, 1)
-        }
-        ReturnValue(UILayout.input_buf)
+        ReturnValue(out)
     }
 }
 
@@ -2376,7 +2411,6 @@ Function.UI_DrawTokenCounts {
 Function.UI_DrawHintRow {
     Body: {
         TUI_SaveCursor()
-        TUI_ClearScrollRegion()
         TUI_MoveTo(UILayout.hint_row, 1)
         TUI_ResetColor()
         TUI_BufferChar(27)
@@ -2426,9 +2460,6 @@ Function.UI_DrawHintRow {
             TUI_SetFG(UIColors.RED_FG)
             TUI_BufferWriteStr("  [SCROLL]")
             TUI_ResetColor()
-        }
-        IfCondition EqualTo(UILayout.streaming, 1) ThenBlock: {
-            TUI_SetScrollRegion(UILayout.chat_top, UILayout.chat_bot)
         }
         TUI_RestoreCursor()
     }

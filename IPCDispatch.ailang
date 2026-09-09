@@ -23,8 +23,8 @@ LibraryImport.JSON
 LibraryImport.StringUtils
 
 FixedPool.IPCDConst {
-    "TABLE_CAP":     Initialize=2048  // 64 slots × 32 bytes — no enforced ceiling
-    "ENTRY_SIZE":    Initialize=32    // 8 name + 8 fd + 8 schema + 8 sock_path
+    "TABLE_CAP":     Initialize=2560  // 64 slots × 40 bytes
+    "ENTRY_SIZE":    Initialize=40    // name + fd + schema + sock_path + binary
 }
 
 FixedPool.IPCDOff {
@@ -32,6 +32,7 @@ FixedPool.IPCDOff {
     "FD":            Initialize=8
     "SCHEMA":        Initialize=16
     "SOCK_PATH":     Initialize=24
+    "BINARY":        Initialize=32
 }
 
 FixedPool.IPCDState {
@@ -287,6 +288,7 @@ Function.IPCDispatch.ConnectProxy {
                     StoreValue(Add(base2, IPCDOff.FD),     fd)         // proxy fd
                     StoreValue(Add(base2, IPCDOff.SCHEMA), _sch)
                     StoreValue(Add(base2, IPCDOff.SOCK_PATH), 0)
+                    StoreValue(Add(base2, IPCDOff.BINARY), 0)
                     IPCDState.count = Add(idx2, 1)
                     JSON.PushObject(IPCDState.schemas_arr, _sch)
                 }
@@ -321,6 +323,7 @@ Function.IPCD_Log {
 Function.IPCDispatch.RegisterTool {
     Input: name: Address
     Input: sock_path: Address
+    Input: binary: Address
     Output: Integer
     Body: {
         IPCD_Log("[ipcd] BEGIN ")
@@ -425,6 +428,7 @@ Function.IPCDispatch.RegisterTool {
         StoreValue(Add(base, IPCDOff.FD),        fd)
         StoreValue(Add(base, IPCDOff.SCHEMA),    schema_obj)
         StoreValue(Add(base, IPCDOff.SOCK_PATH), sock_path)
+        StoreValue(Add(base, IPCDOff.BINARY),    binary)
         IPCDState.count = Add(idx, 1)
 
         // Append schema to cached schemas array
@@ -443,57 +447,23 @@ Function.IPCDispatch.RegisterTool {
 Function.IPCDispatch.GetToolSchemasArray {
     Output: Address
     Body: {
+        // RegisterTool already fetched and cached each schema. Re-querying
+        // every BuildRequest leaked a full ParseJSON tree × 26 tools/turn.
+        IfCondition NotEqual(IPCDState.schemas_arr, 0) ThenBlock: {
+            cached_n = JSON.ArrayLength(IPCDState.schemas_arr)
+            IfCondition GreaterThan(cached_n, 0) ThenBlock: {
+                ReturnValue(IPCDState.schemas_arr)
+            }
+        }
+
+        // Fallback: rebuild from the tool table (still no IPC).
         new_arr = JSON.NewArray()
         i = 0
         WhileLoop LessThan(i, IPCDState.count) {
             base = Add(IPCDState.table, Multiply(i, IPCDConst.ENTRY_SIZE))
-            name = Dereference(Add(base, IPCDOff.NAME))
-            fd = Dereference(Add(base, IPCDOff.FD))
-            
-            IfCondition LessThan(fd, 0) ThenBlock: {
-                sch = Dereference(Add(base, IPCDOff.SCHEMA))
-                IfCondition NotEqual(sch, 0) ThenBlock: {
-                    JSON.PushObject(new_arr, sch)
-                }
-                i = Add(i, 1)
-                ContinueLoop
-            }
-
-            req = JSON.NewObject()
-            JSON.SetString(req, "method", "schema")
-            req_str = JSON.SerializeObject(req)
-            
-            sr = Socket.SendMsg(fd, req_str)
-            IfCondition LessThan(sr, 0) ThenBlock: {
-                IPCDispatch_Reconnect(name)
-                fd = Dereference(Add(base, IPCDOff.FD))
-                sr = Socket.SendMsg(fd, req_str)
-            }
-            
-            IfCondition GreaterEqual(sr, 0) ThenBlock: {
-                Socket.SetRecvTimeout(fd, 5000)
-                resp_str = Socket.RecvMsg(fd)
-                IfCondition EqualTo(resp_str, 0) ThenBlock: {
-                    IPCDispatch_Reconnect(name)
-                    fd = Dereference(Add(base, IPCDOff.FD))
-                    Socket.SendMsg(fd, req_str)
-                    resp_str = Socket.RecvMsg(fd)
-                }
-                IfCondition NotEqual(resp_str, 0) ThenBlock: {
-                    IfCondition NotEqual(resp_str, -1) ThenBlock: {
-                        parsed = ParseJSON(resp_str)
-                        IfCondition NotEqual(parsed, 0) ThenBlock: {
-                            obj = JSON.AsObject(parsed)
-                            IfCondition NotEqual(obj, 0) ThenBlock: {
-                                sch = JSON.GetObject(obj, "schema")
-                                IfCondition NotEqual(sch, 0) ThenBlock: {
-                                    JSON.PushObject(new_arr, sch)
-                                    StoreValue(Add(base, IPCDOff.SCHEMA), sch)
-                                }
-                            }
-                        }
-                    }
-                }
+            sch = Dereference(Add(base, IPCDOff.SCHEMA))
+            IfCondition NotEqual(sch, 0) ThenBlock: {
+                JSON.PushObject(new_arr, sch)
             }
             i = Add(i, 1)
         }
@@ -508,6 +478,76 @@ Function.IPCDispatch.GetToolSchemasArray {
 // buffered on the socket.  Rather than corrupt the next call with that stale
 // data, we drop the connection and open a fresh one.
 // =============================================================================
+Function.IPCDispatch_ReapZombies {
+    Body: {
+        ws = Allocate(8)
+        WhileLoop 1 {
+            StoreValue(ws, 0)
+            wr = SystemCall(61, -1, ws, 1, 0, 0)
+            IfCondition LessEqual(wr, 0) ThenBlock: { BreakLoop }
+        }
+        Deallocate(ws, 8)
+    }
+}
+
+Function.IPCDispatch_SleepMs {
+    Input: ms: Integer
+    Body: {
+        ts = Allocate(16)
+        StoreValue(ts, 0)
+        StoreValue(Add(ts, 8), Multiply(ms, 1000000))
+        SystemCall(35, ts, 0, 0, 0, 0)
+        Deallocate(ts, 16)
+    }
+}
+
+Function.IPCDispatch_TryConnect {
+    Input: sock_path: Address
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(sock_path, 0) ThenBlock: { ReturnValue(-1) }
+        tmp_fd = Socket.Create(1, 1)
+        IfCondition LessThan(tmp_fd, 0) ThenBlock: { ReturnValue(-1) }
+        cr = Socket.ConnectUnix(tmp_fd, sock_path)
+        IfCondition GreaterEqual(cr, 0) ThenBlock: { ReturnValue(tmp_fd) }
+        Socket.Close(tmp_fd)
+        ReturnValue(-1)
+    }
+}
+
+// Fork+exec a dead worker. Empty envp is enough: binary is a relative path.
+Function.IPCDispatch_Respawn {
+    Input: bin: Address
+    Input: name: Address
+    Input: sock_path: Address
+    Output: Integer
+    Body: {
+        IfCondition Or(EqualTo(bin, 0), EqualTo(sock_path, 0)) ThenBlock: { ReturnValue(0) }
+        IPCDispatch_ReapZombies()
+        pid = SystemCall(57, 0, 0, 0, 0, 0)
+        IfCondition EqualTo(pid, 0) ThenBlock: {
+            SystemCall(157, 1, 15, 0, 0, 0)
+            argv = Allocate(32)
+            StoreValue(argv, bin)
+            StoreValue(Add(argv, 8), name)
+            StoreValue(Add(argv, 16), sock_path)
+            StoreValue(Add(argv, 24), 0)
+            envp = Allocate(8)
+            StoreValue(envp, 0)
+            SystemCall(59, bin, argv, envp)
+            SystemCall(60, 127, 0, 0, 0, 0)
+        }
+        IfCondition LessThan(pid, 0) ThenBlock: {
+            IPCD_Log("[ipcd] respawn fork failed\n")
+            ReturnValue(0)
+        }
+        IPCD_Log("[ipcd] respawned ")
+        IPCD_Log(name)
+        IPCD_Log("\n")
+        ReturnValue(1)
+    }
+}
+
 Function.IPCDispatch_Reconnect {
     Input: name: Address
     Body: {
@@ -518,26 +558,20 @@ Function.IPCDispatch_Reconnect {
             IfCondition EqualTo(StringCompare(stored, name), 0) ThenBlock: {
                 old_fd    = Dereference(Add(base, IPCDOff.FD))
                 sock_path = Dereference(Add(base, IPCDOff.SOCK_PATH))
+                bin       = Dereference(Add(base, IPCDOff.BINARY))
 
-                Socket.Close(old_fd)
+                IfCondition GreaterEqual(old_fd, 0) ThenBlock: { Socket.Close(old_fd) }
 
-                attempts = 0
-                new_fd   = -1
-                WhileLoop LessThan(attempts, 2) {
-                    tmp_fd = Socket.Create(1, 1)
-                    
-                    cr = Socket.ConnectUnix(tmp_fd, sock_path)
-                    
-                    IfCondition GreaterEqual(cr, 0) ThenBlock: {
-                        new_fd   = tmp_fd
-                        BreakLoop
-                    } ElseBlock: {
-                        Socket.Close(tmp_fd)
-                        ts = Allocate(16)
-                        StoreValue(ts,        0)
-                        StoreValue(Add(ts,8), 200000000)
-                        SystemCall(35, ts, 0, 0, 0, 0)
-                        Deallocate(ts, 16)
+                new_fd = IPCDispatch_TryConnect(sock_path)
+
+                // Worker is gone (crash/zombie). Respawn and retry bind/connect.
+                IfCondition And(LessThan(new_fd, 0), NotEqual(bin, 0)) ThenBlock: {
+                    IPCDispatch_Respawn(bin, name, sock_path)
+                    attempts = 0
+                    WhileLoop LessThan(attempts, 50) {
+                        new_fd = IPCDispatch_TryConnect(sock_path)
+                        IfCondition GreaterEqual(new_fd, 0) ThenBlock: { BreakLoop }
+                        IPCDispatch_SleepMs(100)
                         attempts = Add(attempts, 1)
                     }
                 }
@@ -603,6 +637,10 @@ Function.IPCDispatch.Dispatch {
         IPCD_Log("\n")
 
         fd = IPCDispatch_FindFd(name)
+        IfCondition LessThan(fd, 0) ThenBlock: {
+            IPCDispatch_Reconnect(name)
+            fd = IPCDispatch_FindFd(name)
+        }
         IfCondition LessThan(fd, 0) ThenBlock: {
             StoreValue(out_is_error_ptr, 1, "dword")
             IPCD_Log("[ipcd] dispatch not registered\n")

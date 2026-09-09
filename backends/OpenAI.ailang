@@ -781,7 +781,8 @@ Function.OpenAI.AppendToolResultsToHistory {
             }
 
             msg = JSON.NewObject()
-            JSON.SetString(msg, "role", "tool")
+            role_s = OpenAI_StrDup("tool")
+            JSON.SetString(msg, "role", role_s)
             JSON.SetString(msg, "tool_call_id", tid)
             JSON.SetString(msg, "content", content)
 
