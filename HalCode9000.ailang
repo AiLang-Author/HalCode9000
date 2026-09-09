@@ -270,6 +270,30 @@ Function.CC_DebugLog {
     }
 }
 
+// JSON.SetString stores the pointer as-is (no copy). JSON.Free /
+// JSON.FreeArray then Deallocate() those pointers. Anything we put in
+// a tree we later free must be a heap copy we own — never a string
+// literal or a live buffer.
+// JSON.Free() is only for ParseJSON tagged values. JSON.NewArray() /
+// JSON.NewObject() return untagged containers — use JSON.FreeArray /
+// JSON.FreeObject, and only if every string value is owned.
+Function.CC_StrDup {
+    Input: src: Address
+    Output: Address
+    Body: {
+        IfCondition EqualTo(src, 0) ThenBlock: { ReturnValue(0) }
+        slen = StringLength(src)
+        dst = Allocate(Add(slen, 1))
+        k = 0
+        WhileLoop LessThan(k, slen) {
+            SetByte(dst, k, GetByte(src, k))
+            k = Add(k, 1)
+        }
+        SetByte(dst, slen, 0)
+        ReturnValue(dst)
+    }
+}
+
 // Check for agent completion flag written by cc_agent_ipc daemon worker.
 // Non-blocking: open returns -1 immediately if file absent.
 Function.CC_CheckAgentNotify {
@@ -1002,8 +1026,122 @@ Function.CC_AnimTick {
 // Runs the request->stream->maybe-dispatch-tools loop until the model
 // stops calling tools.
 // =============================================================================
+Function.CC_GetProcessVirt_MB {
+    Output: Integer
+    Body: {
+        fd = SystemCall(CCSys.SYS_OPEN, "/proc/self/statm", 0, 0, 0, 0)
+        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
+        buf = Allocate(128)
+        n = SystemCall(CCSys.SYS_READ, fd, buf, 127, 0, 0)
+        SystemCall(CCSys.SYS_CLOSE, fd, 0, 0, 0, 0)
+        IfCondition LessEqual(n, 0) ThenBlock: {
+            Deallocate(buf, 128)
+            ReturnValue(0)
+        }
+        SetByte(buf, n, 0)
+        virt_pages = 0
+        i = 0
+        WhileLoop 1 {
+            c = GetByte(buf, i)
+            IfCondition EqualTo(c, 0) ThenBlock: { BreakLoop }
+            IfCondition EqualTo(c, 32) ThenBlock: { BreakLoop }
+            IfCondition And(GreaterEqual(c, 48), LessEqual(c, 57)) ThenBlock: {
+                virt_pages = Add(Multiply(virt_pages, 10), Subtract(c, 48))
+            }
+            i = Add(i, 1)
+        }
+        Deallocate(buf, 128)
+        ReturnValue(Divide(virt_pages, 256))
+    }
+}
+
+Function.CC_GetProcessRSS_MB {
+    Output: Integer
+    Body: {
+        fd = SystemCall(CCSys.SYS_OPEN, "/proc/self/statm", 0, 0, 0, 0)
+        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
+        buf = Allocate(128)
+        n = SystemCall(CCSys.SYS_READ, fd, buf, 127, 0, 0)
+        SystemCall(CCSys.SYS_CLOSE, fd, 0, 0, 0, 0)
+        IfCondition LessEqual(n, 0) ThenBlock: {
+            Deallocate(buf, 128)
+            ReturnValue(0)
+        }
+        SetByte(buf, n, 0)
+        i = 0
+        WhileLoop 1 {
+            c = GetByte(buf, i)
+            IfCondition EqualTo(c, 0) ThenBlock: { BreakLoop }
+            IfCondition EqualTo(c, 32) ThenBlock: { i = Add(i, 1)  BreakLoop }
+            i = Add(i, 1)
+        }
+        rss_pages = 0
+        WhileLoop 1 {
+            c = GetByte(buf, i)
+            IfCondition EqualTo(c, 0) ThenBlock: { BreakLoop }
+            IfCondition EqualTo(c, 32) ThenBlock: { BreakLoop }
+            IfCondition EqualTo(c, 10) ThenBlock: { BreakLoop }
+            IfCondition And(GreaterEqual(c, 48), LessEqual(c, 57)) ThenBlock: {
+                rss_pages = Add(Multiply(rss_pages, 10), Subtract(c, 48))
+            }
+            i = Add(i, 1)
+        }
+        Deallocate(buf, 128)
+        ReturnValue(Divide(rss_pages, 256))
+    }
+}
+
+Function.CC_LogStageMemory {
+    Input: stage_name: Address
+    Body: {
+        rss_mb = CC_GetProcessRSS_MB()
+        virt_mb = CC_GetProcessVirt_MB()
+        hist_cnt = History.Count()
+
+        m_log = StringConcat("[MEM-STAGE] ", stage_name)
+        m_log = StringConcat(m_log, " | RSS: ")
+        m_log = StringConcat(m_log, NumberToString(rss_mb))
+        m_log = StringConcat(m_log, " MB | VIRT: ")
+        m_log = StringConcat(m_log, NumberToString(virt_mb))
+        m_log = StringConcat(m_log, " MB | History: ")
+        m_log = StringConcat(m_log, NumberToString(hist_cnt))
+        m_log = StringConcat(m_log, " msgs\n")
+
+        CC_DebugLog(m_log)
+
+        // Write to persistent instrument log: /tmp/hal_mem_instrument.log
+        m_fd = SystemCall(CCSys.SYS_OPEN, "/tmp/hal_mem_instrument.log", 1089, 420, 0, 0) // O_WRONLY|O_CREAT|O_APPEND
+        IfCondition GreaterEqual(m_fd, 0) ThenBlock: {
+            SystemCall(CCSys.SYS_WRITE, m_fd, m_log, StringLength(m_log), 0, 0)
+            SystemCall(CCSys.SYS_CLOSE, m_fd, 0, 0, 0, 0)
+        }
+    }
+}
+
+Function.CC_PrintMemoryReport {
+    Body: {
+        rss_mb = CC_GetProcessRSS_MB()
+        virt_mb = CC_GetProcessVirt_MB()
+        hist_cnt = History.Count()
+        
+        msg = StringConcat("RSS: ", NumberToString(rss_mb))
+        msg = StringConcat(msg, " MB | VIRT: ")
+        msg = StringConcat(msg, NumberToString(virt_mb))
+        msg = StringConcat(msg, " MB | History: ")
+        msg = StringConcat(msg, NumberToString(hist_cnt))
+        msg = StringConcat(msg, " msgs")
+        UI.ChatTag("ℹ", msg, 2)
+        CC_LogStageMemory("USER_MEM_CMD")
+    }
+}
+
 Function.CC_RunTurn {
     Body: {
+        rss_turn_start = CC_GetProcessRSS_MB()
+        m_start_msg = StringConcat("Start of turn. Process RSS: ", NumberToString(rss_turn_start))
+        m_start_msg = StringConcat(m_start_msg, " MB\n")
+        CC_DebugLog(m_start_msg)
+
         keep_going = 1
         chain_count = 0
         CC_DebugLog("\n\n==================== NEW TURN ====================\n")
@@ -1026,7 +1164,6 @@ Function.CC_RunTurn {
                     } ElseBlock: {
                         IfCondition And(EqualTo(ans_len, 1), Or(EqualTo(first, 97), EqualTo(first, 65))) ThenBlock: {
                             CCRunState.auto_approve = 1
-                            UI.ChatTag("✓", "Autonomy approved for the rest of this session.", 2) // 2 = GREEN
                             chain_count = 0
                         } ElseBlock: {
                             IfCondition And(EqualTo(ans_len, 1), Or(EqualTo(first, 121), EqualTo(first, 89))) ThenBlock: {
@@ -1058,17 +1195,33 @@ Function.CC_RunTurn {
             max_retries = 3
             retry_count = 0
             request_ok = 0
-            retry_delay_ms = 2000
-            is_interrupted_turn = 0
             permanent_fail = 0
+            retry_delay_ms = 2000
 
             WhileLoop And(And(LessThan(retry_count, max_retries), EqualTo(request_ok, 0)), EqualTo(permanent_fail, 0)) {
 
             CC_DebugLog("Building request...\n")
+            CC_LogStageMemory("BEFORE_BUILD_REQUEST")
 
             messages = History.GetMessagesArray()
             tools = IPCDispatch.GetToolSchemasArray()
             body = Backend.BuildRequest(messages, tools)
+            CC_LogStageMemory("AFTER_BUILD_REQUEST")
+
+            // Dump full request so malformed JSON is inspectable at column 17271.
+            _bfd = SystemCall(CCSys.SYS_OPEN, "/tmp/hal_body.json", 577, 420, 0, 0)
+            IfCondition GreaterEqual(_bfd, 0) ThenBlock: {
+                SystemCall(CCSys.SYS_WRITE, _bfd, body, StringLength(body), 0, 0)
+                SystemCall(CCSys.SYS_CLOSE, _bfd, 0, 0, 0, 0)
+            }
+            _mfd = SystemCall(CCSys.SYS_OPEN, "/tmp/hal_msgs.json", 577, 420, 0, 0)
+            IfCondition GreaterEqual(_mfd, 0) ThenBlock: {
+                _ms = JSON.SerializeArray(messages)
+                IfCondition NotEqual(_ms, 0) ThenBlock: {
+                    SystemCall(CCSys.SYS_WRITE, _mfd, _ms, StringLength(_ms), 0, 0)
+                }
+                SystemCall(CCSys.SYS_CLOSE, _mfd, 0, 0, 0, 0)
+            }
 
             body_len_str = StringConcat("Request body size: ", NumberToString(StringLength(body)))
             body_len_str = StringConcat(body_len_str, " bytes\n")
@@ -1094,31 +1247,6 @@ Function.CC_RunTurn {
             
             headers = StringConcat(base_headers, ua_header)
             headers = StringConcat(headers, clen_header)
-
-            // DBG: dump full body to /tmp/hal_body.json for forensics
-            _bfd = SystemCall(2, "/tmp/hal_body.json", BitwiseOr(BitwiseOr(1,64),512), 420, 0, 0)
-            IfCondition GreaterEqual(_bfd, 0) ThenBlock: {
-                _bfull = StringLength(body)
-                SystemCall(1, _bfd, body, _bfull, 0, 0)
-                SystemCall(3, _bfd, 0, 0, 0, 0)
-            }
-            // DBG: log url + headers to /tmp/hal_turn.log
-            _dfd = SystemCall(2, "/tmp/hal_turn.log", BitwiseOr(BitwiseOr(1,64),512), 420, 0, 0)
-            IfCondition GreaterEqual(_dfd, 0) ThenBlock: {
-                SystemCall(1, _dfd, "URL: ", 5, 0, 0)
-                SystemCall(1, _dfd, url, StringLength(url), 0, 0)
-                SystemCall(1, _dfd, "\n", 1, 0, 0)
-                SystemCall(1, _dfd, "HDR: ", 5, 0, 0)
-                _hlen = StringLength(headers)
-                IfCondition GreaterThan(_hlen, 60) ThenBlock: { _hlen = 60 }
-                SystemCall(1, _dfd, headers, _hlen, 0, 0)
-                SystemCall(1, _dfd, "\n", 1, 0, 0)
-                SystemCall(1, _dfd, "BODY_LEN: ", 10, 0, 0)
-                _bnum = NumberToString(StringLength(body))
-                SystemCall(1, _dfd, _bnum, StringLength(_bnum), 0, 0)
-                SystemCall(1, _dfd, "\n", 1, 0, 0)
-                SystemCall(3, _dfd, 0, 0, 0, 0)
-            }
 
             UI.SetState(1)
             CC_ShowQuote()
@@ -1190,20 +1318,6 @@ Function.CC_RunTurn {
                 IfCondition GreaterEqual(line_len, 0) ThenBlock: {
                     SetByte(line_buf, line_len, 0)
                 }
-                    _lfd = SystemCall(2, "/tmp/hal_turn.log", BitwiseOr(BitwiseOr(1,64),1024), 420, 0, 0)
-                    IfCondition GreaterEqual(_lfd, 0) ThenBlock: {
-                        SystemCall(1, _lfd, "LINE(", 5, 0, 0)
-                        _lln = Allocate(8)
-                        _ll2 = NumberToString(line_len)
-                        SystemCall(1, _lfd, _ll2, StringLength(_ll2), 0, 0)
-                        SystemCall(1, _lfd, "): ", 3, 0, 0)
-                        IfCondition GreaterThan(line_len, 0) ThenBlock: {
-                            SystemCall(1, _lfd, line_buf, line_len, 0, 0)
-                        }
-                        SystemCall(1, _lfd, "\n", 1, 0, 0)
-                        SystemCall(3, _lfd, 0, 0, 0, 0)
-                        Deallocate(_lln, 8)
-                    }
                     line_count = Add(line_count, 1)
                 IfCondition LessThan(line_len, 0) ThenBlock: {
                     stream_done = 1
@@ -1266,28 +1380,31 @@ Function.CC_RunTurn {
                 clean_stop = Backend.IsCleanStop()
             }
 
+            // Interrupt always wins. IsCleanStop can already be true (finish_reason
+            // arrived) while text/args buffers are truncated mid-UTF-8 character.
+            // Committing that poisons every later request with
+            // "invalid unicode code point".
+            IfCondition EqualTo(is_interrupted_turn, 1) ThenBlock: {
+                UI.ChatTag("✗", "Turn interrupted by user.", 3)
+
+                user_msg = UI.ConsumeInterrupt()
+                msg_len = StringLength(user_msg)
+                IfCondition GreaterThan(msg_len, 0) ThenBlock: {
+                    UI.ChatTag("›", user_msg, 6)
+                    // AppendUser aliases the pointer — do not Deallocate.
+                    History.AppendUser(user_msg)
+                    keep_going = 1
+                }
+                request_ok = 0
+                BreakLoop
+            }
+
             // Check for mid-stream drop
             IfCondition And(EqualTo(clean_stop, 0), EqualTo(is_api_error, 0)) ThenBlock: {
-                IfCondition EqualTo(is_interrupted_turn, 1) ThenBlock: {
-                    UI.ChatTag("✗", "Turn interrupted by user.", 3) // 3 = ORANGE_FG
-
-                    user_msg = UI.ConsumeInterrupt()
-                    msg_len = StringLength(user_msg)
-                    IfCondition GreaterThan(msg_len, 0) ThenBlock: {
-                        // User typed steering text during stream — send as next user turn
-                        UI.ChatTag("›", user_msg, 6)
-                        History.AppendUser(user_msg)
-                        keep_going = 1
-                    }
-                    // Bare ESC (no text): keep_going stays 0 — stop cleanly
-                    Deallocate(user_msg, Add(msg_len, 1))
-                    BreakLoop
-                } ElseBlock: {
-                    CC_DebugLog("API stream DROPPED without clean stop.\n")
-                    UI.ChatTag("✗", "API connection dropped mid-stream (Overload / Timeout)", 1)
-                    UI.SetState(0)
-                    is_api_error = 1
-                }
+                CC_DebugLog("API stream DROPPED without clean stop.\n")
+                UI.ChatTag("✗", "API connection dropped mid-stream (Overload / Timeout)", 1)
+                UI.SetState(0)
+                is_api_error = 1
             } ElseBlock: {
                 IfCondition EqualTo(is_api_error, 0) ThenBlock: {
                     CC_DebugLog("API stream finished with clean stop.\n")
@@ -1309,6 +1426,7 @@ Function.CC_RunTurn {
             } ElseBlock: {
                 request_ok = 1
                 CC_DebugLog("Request OK.\n")
+                CC_LogStageMemory("AFTER_API_STREAM")
             }
 
             } // --- End of Retry Loop ---
@@ -1339,15 +1457,24 @@ Function.CC_RunTurn {
                     results = JSON.NewArray()
                     i = 0
                     WhileLoop LessThan(i, n_tools) {
+                        CC_DebugLog(StringConcat("[STEP H1] Starting tool loop index ", NumberToString(i)))
+                        CC_DebugLog("\n")
                         tu_tag = JSON.ArrayGet(pending, i)
+                        CC_DebugLog("[STEP H2] ArrayGet done\n")
                         tu = JSON.AsObject(tu_tag)
+                        CC_DebugLog("[STEP H3] AsObject done\n")
                         IfCondition NotEqual(tu, 0) ThenBlock: {
                             // Use stable accessors that bypass the JSON-lib
                             // hash-collision bug. Name/id come from a parallel
                             // string-pointer array stashed at content_block_start.
                             tname = Backend.GetToolName(i)
+                            CC_DebugLog("[STEP H4] GetToolName done: ")
+                            CC_DebugLog(tname)
+                            CC_DebugLog("\n")
                             tid   = Backend.GetToolId(i)
+                            CC_DebugLog("[STEP H5] GetToolId done\n")
                             tinput = JSON.GetObject(tu, "input")
+                            CC_DebugLog("[STEP H6] GetObject input done\n")
 
                             // Build a short arg summary for display.
                             // Use "path" if present, else the first JSON value, else "".
@@ -1383,12 +1510,21 @@ Function.CC_RunTurn {
                             log_msg = StringConcat(log_msg, "]\n")
                             CC_DebugLog(log_msg)
 
+                            IfCondition EqualTo(UI.HasInterrupt(), 1) ThenBlock: {
+                                CC_DebugLog("[STEP H7] skipped — user interrupt\n")
+                                content = "Interrupted by user."
+                                is_err = 1
+                                ok_flag = 0
+                            } ElseBlock: {
+                            CC_DebugLog("[STEP H7] Allocating err_holder and calling IPCDispatch.Dispatch\n")
                             err_holder = Allocate(8)
                             StoreValue(err_holder, 0, "dword")
                             content = IPCDispatch.Dispatch(tname, tinput, tid, err_holder)
+                            CC_DebugLog("[STEP H8] IPCDispatch.Dispatch returned!\n")
                             is_err = Dereference(err_holder, "dword")
                             Deallocate(err_holder, 8)
                             ok_flag = 1
+                            }
 
                             log_msg = StringConcat("Tool [", tname)
                             log_msg = StringConcat(log_msg, "] returned. is_err=")
@@ -1424,6 +1560,11 @@ Function.CC_RunTurn {
                                 pgmem_ret = IPCDispatch.Dispatch("Pgmem", park_args, "", perr)
                                 park_failed = Dereference(perr, "dword")
                                 Deallocate(perr, 8)
+                                // Do not JSON.Free(park_args): SetString aliased
+                                // literals ("park", "tool_result") and `content`.
+                                IfCondition NotEqual(pgmem_ret, 0) ThenBlock: {
+                                    Deallocate(pgmem_ret, Add(StringLength(pgmem_ret), 1))
+                                }
                                 IfCondition EqualTo(park_failed, 0) ThenBlock: {
                                     CC_DebugLog("Parked large tool output to Pgmem.\n")
                                     nbytes = NumberToString(StringLength(content))
@@ -1454,26 +1595,47 @@ Function.CC_RunTurn {
                                 }
                             }
 
-                            r = JSON.NewObject()
-                            IfCondition NotEqual(tid, 0) ThenBlock: {
-                                JSON.SetString(r, "tool_use_id", tid)
-                            }
-                            IfCondition NotEqual(content, 0) ThenBlock: {
-                                JSON.SetString(r, "content", content)
-                            }
-                            IfCondition EqualTo(is_err, 1) ThenBlock: {
-                                JSON.SetBool(r, "is_error", 1)
-                            }
-                            JSON.PushObject(results, r)
-                        }
-                        i = Add(i, 1)
-                    }
-                    CC_DebugLog("Appending tool results to history.\n")
-                    UI.ToolGroupEnd(n_tools)
-                    Backend.AppendToolResultsToHistory(results)
-                    Backend.Reset()
-                    UI.SetReasoning("")
-                    keep_going = 1
+                             CC_DebugLog("[STEP H9] Creating result JSON object r\n")
+                             r = JSON.NewObject()
+                             IfCondition NotEqual(tid, 0) ThenBlock: {
+                                 tid_copy = CC_StrDup(tid)
+                                 JSON.SetString(r, "tool_use_id", tid_copy)
+                             }
+                             IfCondition NotEqual(content, 0) ThenBlock: {
+                                 content_copy = CC_StrDup(content)
+                                 JSON.SetString(r, "content", content_copy)
+                             }
+                             IfCondition EqualTo(is_err, 1) ThenBlock: {
+                                 JSON.SetBool(r, "is_error", 1)
+                             }
+                             CC_DebugLog("[STEP H10] Pushing r to results array\n")
+                             JSON.PushObject(results, r)
+                         }
+                         i = Add(i, 1)
+                     }
+                     CC_DebugLog("[STEP H11] Appending tool results to history.\n")
+                     UI.ToolGroupEnd(n_tools)
+                     Backend.AppendToolResultsToHistory(results)
+                     CC_DebugLog("[STEP H12] Freeing results array\n")
+                     // NewArray() returns an untagged 32-byte Array header.
+                     // JSON.Free() expects a 16-byte tagged value and would
+                     // Deallocate(results, 16), corrupting the arena.
+                     JSON.FreeArray(results)
+                     CC_LogStageMemory("AFTER_TOOL_DISPATCH")
+                     CC_DebugLog("[STEP H13] Calling Backend.Reset()\n")
+                     Backend.Reset()
+                     UI.SetReasoning("")
+                     IfCondition EqualTo(UI.HasInterrupt(), 1) ThenBlock: {
+                         CC_DebugLog("[STEP H14] Tool dispatch loop complete. Interrupted — not auto-continuing.\n")
+                         steer = UI.ConsumeInterrupt()
+                         IfCondition And(NotEqual(steer, 0), GreaterThan(StringLength(steer), 0)) ThenBlock: {
+                             History.AppendUser(steer)
+                         }
+                         keep_going = 0
+                     } ElseBlock: {
+                         CC_DebugLog("[STEP H14] Tool dispatch loop complete. Setting keep_going=1\n")
+                         keep_going = 1
+                     }
                 } ElseBlock: {
                     CC_DebugLog("No tools requested. Turn complete.\n")
                     Backend.Reset()
@@ -1490,9 +1652,18 @@ Function.CC_RunTurn {
                     Backend.Reset()
                 }
             }
+
+            rss_turn_end = CC_GetProcessRSS_MB()
+            m_end_msg = StringConcat("End of turn. Process RSS: ", NumberToString(rss_turn_end))
+            m_end_msg = StringConcat(m_end_msg, " MB (turn diff: ")
+            m_end_msg = StringConcat(m_end_msg, NumberToString(Subtract(rss_turn_end, rss_turn_start)))
+            m_end_msg = StringConcat(m_end_msg, " MB)\n")
+            CC_DebugLog(m_end_msg)
         }
     }
 }
+
+
 
 // =============================================================================
 // DEMO MODE — render a sample conversation without real auth/tools.
@@ -2080,9 +2251,9 @@ Function.CC_SaveSessionToPgmem {
         IfCondition NotEqual(SelectedProvider.default_model, 0) ThenBlock: {
             JSON.SetString(meta_obj, "model", SelectedProvider.default_model)
         }
-        JSON.SetNumber(meta_obj, "turns", History.Count())
+        JSON.SetString(meta_obj, "turns", NumberToString(History.Count()))
         ts = SystemCall(CCSys.SYS_TIME, 0, 0, 0, 0, 0)
-        JSON.SetNumber(meta_obj, "updated_at", ts)
+        JSON.SetString(meta_obj, "updated_at", NumberToString(ts))
         meta_json = JSON.SerializeObject(meta_obj)
 
         m_key = StringConcat("session:", sid)
@@ -2139,13 +2310,7 @@ Function.CC_LoadSessionFromPgmem {
         IfCondition Or(EqualTo(err, 1), EqualTo(h_resp, 0)) ThenBlock: { ReturnValue(0) }
         IfCondition EqualTo(StringLength(h_resp), 0) ThenBlock: { ReturnValue(0) }
 
-        h_parsed = ParseJSON(h_resp)
-        h_obj = JSON.AsObject(h_parsed)
-        history_json = 0
-        IfCondition NotEqual(h_obj, 0) ThenBlock: {
-            history_json = JSON.GetString(h_obj, "content")
-        }
-        ok = History.LoadFromJSON(history_json)
+        ok = History.LoadFromJSON(h_resp)
         IfCondition EqualTo(ok, 1) ThenBlock: {
             History.SetSessionID(sid)
 
@@ -2191,10 +2356,7 @@ Function.CC_ResumeLastSession {
         IfCondition Or(EqualTo(err, 1), EqualTo(last_sid, 0)) ThenBlock: { ReturnValue(0) }
         IfCondition EqualTo(StringLength(last_sid), 0) ThenBlock: { ReturnValue(0) }
 
-        l_obj = JSON.AsObject(ParseJSON(last_sid))
-        IfCondition EqualTo(l_obj, 0) ThenBlock: { ReturnValue(0) }
-        actual_sid = JSON.GetString(l_obj, "content")
-        ReturnValue(CC_LoadSessionFromPgmem(actual_sid))
+        ReturnValue(CC_LoadSessionFromPgmem(last_sid))
     }
 }
 
@@ -2242,30 +2404,52 @@ Function.CC_SelectAndLoadSession {
             row_tag = JSON.ArrayGet(rows, i)
             row = JSON.AsObject(row_tag)
             IfCondition NotEqual(row, 0) ThenBlock: {
-                content_str = JSON.GetString(row, "content")
-                IfCondition NotEqual(content_str, 0) ThenBlock: {
-                    m_obj = JSON.AsObject(ParseJSON(content_str))
-                    IfCondition NotEqual(m_obj, 0) ThenBlock: {
-                        sid = JSON.GetString(m_obj, "id")
-                        title = JSON.GetString(m_obj, "title")
-                        model = JSON.GetString(m_obj, "model")
-                        turns = JSON.GetNumber(m_obj, "turns")
-                        IfCondition EqualTo(title, 0) ThenBlock: { title = "Untitled" }
-                        IfCondition EqualTo(model, 0) ThenBlock: { model = "Unknown" }
+                key = JSON.GetString(row, "key")
+                is_meta = 0
+                IfCondition NotEqual(key, 0) ThenBlock: {
+                    klen = StringLength(key)
+                    IfCondition GreaterThan(klen, 5) ThenBlock: {
+                        sub_pos = Subtract(klen, 5)
+                        IfCondition EqualTo(StringCompare(Add(key, sub_pos), ":meta"), 0) ThenBlock: {
+                            is_meta = 1
+                        }
+                    }
+                }
 
-                        JSON.PushObject(sids, m_obj)
+                IfCondition EqualTo(is_meta, 1) ThenBlock: {
+                    content_str = JSON.GetString(row, "content")
+                    IfCondition NotEqual(content_str, 0) ThenBlock: {
+                        m_obj = JSON.AsObject(ParseJSON(content_str))
+                        IfCondition NotEqual(m_obj, 0) ThenBlock: {
+                            sid = JSON.GetString(m_obj, "id")
+                            title = JSON.GetString(m_obj, "title")
+                            model = JSON.GetString(m_obj, "model")
+                            turns = JSON.GetNumber(m_obj, "turns")
+                            turns_str = JSON.GetString(m_obj, "turns")
+                            IfCondition EqualTo(turns, 0) ThenBlock: {
+                                IfCondition NotEqual(turns_str, 0) ThenBlock: {
+                                    turns = StringToNumber(turns_str)
+                                }
+                            }
+                            IfCondition EqualTo(sid, 0) ThenBlock: { sid = "Unknown" }
+                            IfCondition EqualTo(title, 0) ThenBlock: { title = "Untitled" }
+                            IfCondition EqualTo(model, 0) ThenBlock: { model = "Unknown" }
 
-                        CC_WriteStdout("  ")
-                        CC_WriteStdout(NumberToString(Add(i, 1)))
-                        CC_WriteStdout(". [")
-                        CC_WriteStdout(sid)
-                        CC_WriteStdout("] ")
-                        CC_WriteStdout(title)
-                        CC_WriteStdout(" (")
-                        CC_WriteStdout(NumberToString(turns))
-                        CC_WriteStdout(" turns, ")
-                        CC_WriteStdout(model)
-                        CC_WriteStdout(")\n")
+                            JSON.PushObject(sids, m_obj)
+
+                            sid_count = JSON.ArrayLength(sids)
+                            CC_WriteStdout("  ")
+                            CC_WriteStdout(NumberToString(sid_count))
+                            CC_WriteStdout(". [")
+                            CC_WriteStdout(sid)
+                            CC_WriteStdout("] ")
+                            CC_WriteStdout(title)
+                            CC_WriteStdout(" (")
+                            CC_WriteStdout(NumberToString(turns))
+                            CC_WriteStdout(" turns, ")
+                            CC_WriteStdout(model)
+                            CC_WriteStdout(")\n")
+                        }
                     }
                 }
             }
@@ -2851,6 +3035,9 @@ Function.CC_ChatLoop {
                 }
                 IfCondition EqualTo(StringCompare(line, "/help"), 0) ThenBlock: {
                     UI.PrintHelp()
+                }
+                IfCondition Or(EqualTo(StringCompare(line, "/mem"), 0), EqualTo(StringCompare(line, "/stats"), 0)) ThenBlock: {
+                    CC_PrintMemoryReport()
                 }
                 IfCondition Or(EqualTo(StringCompare(line, "/models"), 0), EqualTo(StringCompare(line, "/refresh-models"), 0)) ThenBlock: {
                     UI.ChatTag("→", "Querying provider APIs and updating model definitions...", 2)
@@ -4479,7 +4666,6 @@ SubRoutine.Main {
             CCRunState.auth_cred = credential
 
             CCConst.PROJ_PROMPT = CC_LoadProjectPrompt()
-            History.Init()
             Backend.Init(auth_mode_str, credential, CC_BuildFullPrompt())
 
             // Now grab the terminal — auth is done, no more cooked-mode prints.

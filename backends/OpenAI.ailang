@@ -193,7 +193,10 @@ Function.OpenAI.BuildRequest {
             m = JSON.ArrayGet(messages_arr, i)
             m_obj = JSON.AsObject(m)
             IfCondition NotEqual(m_obj, 0) ThenBlock: {
-                JSON.PushObject(new_msgs, m_obj)
+                role = JSON.GetString(m_obj, "role")
+                IfCondition NotEqual(role, 0) ThenBlock: {
+                    JSON.PushObject(new_msgs, m_obj)
+                }
             }
             i = Add(i, 1)
         }
@@ -317,17 +320,6 @@ Function.OpenAI.OnEvent {
     Input: event_data: Address
     Output: Integer
     Body: {
-        // DBG: log first 80 chars of every SSE event to /tmp/oai_debug.log
-        dbg_fd = SystemCall(2, "/tmp/oai_debug.log",
-                            BitwiseOr(BitwiseOr(1, 64), 512), 420, 0, 0)
-        IfCondition GreaterEqual(dbg_fd, 0) ThenBlock: {
-            dlen = StringLength(event_data)
-            IfCondition GreaterThan(dlen, 80) ThenBlock: { dlen = 80 }
-            SystemCall(1, dbg_fd, event_data, dlen, 0, 0)
-            SystemCall(1, dbg_fd, "\n", 1, 0, 0)
-            SystemCall(3, dbg_fd, 0, 0, 0, 0)
-        }
-
         IfCondition EqualTo(StringCompare(event_data, "[DONE]"), 0) ThenBlock: {
             // Flush the final reasoning text
             IfCondition GreaterThan(OAIState.reasoning_used, 0) ThenBlock: {
@@ -340,8 +332,12 @@ Function.OpenAI.OnEvent {
             }
         }
 
-        obj = JSON.AsObject(ParseJSON(event_data))
+        parsed = ParseJSON(event_data)
+        obj = JSON.AsObject(parsed)
         IfCondition EqualTo(obj, 0) ThenBlock: {
+            IfCondition NotEqual(parsed, 0) ThenBlock: {
+                JSON.Free(parsed)
+            }
             ReturnValue(OAISignal.CONTINUE)
         }
 
@@ -434,6 +430,9 @@ Function.OpenAI.OnEvent {
             }
         }
 
+        IfCondition NotEqual(parsed, 0) ThenBlock: {
+            JSON.Free(parsed)
+        }
         ReturnValue(OAISignal.CONTINUE)
     }
 }
@@ -503,56 +502,133 @@ Function.OpenAI_StrDup {
 // through Library.JSON's hash table. This sidesteps the task-#28 collision
 // bug that dropped tool_calls when reasoning_content was in the same object.
 // ParseJSON on the resulting string produces a clean, collision-free object.
+//
+// Memory note: the old implementation chained ~20 StringConcat calls, each of
+// which leaked a fresh arena allocation for the life of the process. This
+// version measures the exact output size, allocates ONCE, and appends into
+// that buffer byte-by-byte. Escaped intermediates are Deallocated after use.
+Function.OpenAI_Append {
+    Input: dst: Address
+    Input: off: Integer
+    Input: src: Address
+    Output: Integer
+    Body: {
+        i = 0
+        WhileLoop 1 {
+            c = GetByte(src, i)
+            IfCondition EqualTo(c, 0) ThenBlock: { BreakLoop }
+            SetByte(dst, off, c)
+            off = Add(off, 1)
+            i = Add(i, 1)
+        }
+        ReturnValue(off)
+    }
+}
+
 Function.OpenAI_BuildAssistantMsgStr {
     Output: Address
     Body: {
-        // {"role":"assistant","content":"<esc>
         esc_content = JSON.EscapeString(OAIState.text_buf)
-        s = "{\"role\":\"assistant\",\"content\":\""
-        s = StringConcat(s, esc_content)
-        s = StringConcat(s, "\"")
+        esc_rc = 0
+        has_rc = 0
 
-        // Echo THIS turn's reasoning_content when the model actually returned one.
-        // Thinking-mode APIs (DeepSeek Flash/Pro) require the COT to be passed back
-        // in the SAME assistant message turn that produced it — not a subsequent turn.
+        // measure pass: compute the exact output length
+        total = StringLength("{\"role\":\"assistant\",\"content\":\"")
+        total = Add(total, StringLength(esc_content))
+        total = Add(total, StringLength("\""))
+
         IfCondition GreaterThan(OAIState.reasoning_used, 0) ThenBlock: {
+            has_rc = 1
             esc_rc = JSON.EscapeString(OAIState.reasoning_buf)
-            s = StringConcat(s, ",\"reasoning_content\":\"")
-            s = StringConcat(s, esc_rc)
-            s = StringConcat(s, "\"")
+            total = Add(total, StringLength(",\"reasoning_content\":\""))
+            total = Add(total, StringLength(esc_rc))
+            total = Add(total, StringLength("\""))
         }
 
-        // ,"tool_calls":[...]
         IfCondition GreaterThan(OAIState.tool_count, 0) ThenBlock: {
-            s = StringConcat(s, ",\"tool_calls\":[")
+            total = Add(total, StringLength(",\"tool_calls\":["))
             i = 0
             WhileLoop LessThan(i, OAIState.tool_count) {
-                IfCondition GreaterThan(i, 0) ThenBlock: { s = StringConcat(s, ",") }
+                IfCondition GreaterThan(i, 0) ThenBlock: {
+                    total = Add(total, StringLength(","))
+                }
                 slot = Add(OAIState.tool_slots, Multiply(i, 32))
                 id_ptr   = Dereference(Add(slot, 0))
                 name_ptr = Dereference(Add(slot, 8))
                 args_ptr = Dereference(Add(slot, 16))
-                esc_id   = JSON.EscapeString(id_ptr)
-                esc_name = JSON.EscapeString(name_ptr)
-                // arguments must be a JSON-encoded STRING (not a nested object)
                 safe_args = args_ptr
                 IfCondition EqualTo(args_ptr, 0) ThenBlock: { safe_args = "{}" }
                 IfCondition EqualTo(StringLength(safe_args), 0) ThenBlock: { safe_args = "{}" }
+                esc_id   = JSON.EscapeString(id_ptr)
+                esc_name = JSON.EscapeString(name_ptr)
                 esc_args = JSON.EscapeString(safe_args)
-                s = StringConcat(s, "{\"id\":\"")
-                s = StringConcat(s, esc_id)
-                s = StringConcat(s, "\",\"type\":\"function\",\"function\":{\"name\":\"")
-                s = StringConcat(s, esc_name)
-                s = StringConcat(s, "\",\"arguments\":\"")
-                s = StringConcat(s, esc_args)
-                s = StringConcat(s, "\"}}")
+                total = Add(total, StringLength("{\"id\":\""))
+                total = Add(total, StringLength(esc_id))
+                total = Add(total, StringLength("\",\"type\":\"function\",\"function\":{\"name\":\""))
+                total = Add(total, StringLength(esc_name))
+                total = Add(total, StringLength("\",\"arguments\":\""))
+                total = Add(total, StringLength(esc_args))
+                total = Add(total, StringLength("\"}}"))
+                Deallocate(esc_id, Add(StringLength(esc_id), 1))
+                Deallocate(esc_name, Add(StringLength(esc_name), 1))
+                Deallocate(esc_args, Add(StringLength(esc_args), 1))
                 i = Add(i, 1)
             }
-            s = StringConcat(s, "]")
+            total = Add(total, StringLength("]"))
         }
 
-        s = StringConcat(s, "}")
-        ReturnValue(s)
+        total = Add(total, StringLength("}"))
+
+        // build pass: append into one exact-size buffer
+        buf = Allocate(Add(total, 1))
+        off = 0
+        off = OpenAI_Append(buf, off, "{\"role\":\"assistant\",\"content\":\"")
+        off = OpenAI_Append(buf, off, esc_content)
+        off = OpenAI_Append(buf, off, "\"")
+        Deallocate(esc_content, Add(StringLength(esc_content), 1))
+
+        IfCondition EqualTo(has_rc, 1) ThenBlock: {
+            off = OpenAI_Append(buf, off, ",\"reasoning_content\":\"")
+            off = OpenAI_Append(buf, off, esc_rc)
+            off = OpenAI_Append(buf, off, "\"")
+            Deallocate(esc_rc, Add(StringLength(esc_rc), 1))
+        }
+
+        IfCondition GreaterThan(OAIState.tool_count, 0) ThenBlock: {
+            off = OpenAI_Append(buf, off, ",\"tool_calls\":[")
+            i = 0
+            WhileLoop LessThan(i, OAIState.tool_count) {
+                IfCondition GreaterThan(i, 0) ThenBlock: {
+                    off = OpenAI_Append(buf, off, ",")
+                }
+                slot = Add(OAIState.tool_slots, Multiply(i, 32))
+                id_ptr   = Dereference(Add(slot, 0))
+                name_ptr = Dereference(Add(slot, 8))
+                args_ptr = Dereference(Add(slot, 16))
+                safe_args = args_ptr
+                IfCondition EqualTo(args_ptr, 0) ThenBlock: { safe_args = "{}" }
+                IfCondition EqualTo(StringLength(safe_args), 0) ThenBlock: { safe_args = "{}" }
+                esc_id   = JSON.EscapeString(id_ptr)
+                esc_name = JSON.EscapeString(name_ptr)
+                esc_args = JSON.EscapeString(safe_args)
+                off = OpenAI_Append(buf, off, "{\"id\":\"")
+                off = OpenAI_Append(buf, off, esc_id)
+                off = OpenAI_Append(buf, off, "\",\"type\":\"function\",\"function\":{\"name\":\"")
+                off = OpenAI_Append(buf, off, esc_name)
+                off = OpenAI_Append(buf, off, "\",\"arguments\":\"")
+                off = OpenAI_Append(buf, off, esc_args)
+                off = OpenAI_Append(buf, off, "\"}}")
+                Deallocate(esc_id, Add(StringLength(esc_id), 1))
+                Deallocate(esc_name, Add(StringLength(esc_name), 1))
+                Deallocate(esc_args, Add(StringLength(esc_args), 1))
+                i = Add(i, 1)
+            }
+            off = OpenAI_Append(buf, off, "]")
+        }
+
+        off = OpenAI_Append(buf, off, "}")
+        SetByte(buf, off, 0)
+        ReturnValue(buf)
     }
 }
 
@@ -563,7 +639,12 @@ Function.OpenAI.CommitAssistantToHistory {
         msg = JSON.AsObject(parsed)
         IfCondition NotEqual(msg, 0) ThenBlock: {
             History.AppendRaw(msg)
+        } ElseBlock: {
+            IfCondition NotEqual(parsed, 0) ThenBlock: {
+                JSON.Free(parsed)
+            }
         }
+        Deallocate(raw, Add(StringLength(raw), 1))
     }
 }
 
@@ -620,7 +701,12 @@ Function.OpenAI_SanitizeUTF8 {
                             b2 = GetByte(src, ri2)
                             v1 = And(GreaterEqual(b1, 128), LessEqual(b1, 191))
                             v2 = And(GreaterEqual(b2, 128), LessEqual(b2, 191))
-                            IfCondition And(EqualTo(v1, 1), EqualTo(v2, 1)) ThenBlock: {
+                            // ED A0..BF is U+D800-DFFF (surrogates) — invalid in UTF-8.
+                            // E0 80..9F is overlong. APIs reject both as bad code points.
+                            surr = 0
+                            IfCondition And(EqualTo(b, 237), GreaterThan(b1, 159)) ThenBlock: { surr = 1 }
+                            IfCondition And(EqualTo(b, 224), LessThan(b1, 160)) ThenBlock: { surr = 1 }
+                            IfCondition And(And(EqualTo(v1, 1), EqualTo(v2, 1)), EqualTo(surr, 0)) ThenBlock: {
                                 SetByte(out, wi, b)   wi = Add(wi, 1)
                                 SetByte(out, wi, b1)  wi = Add(wi, 1)
                                 SetByte(out, wi, b2)  wi = Add(wi, 1)

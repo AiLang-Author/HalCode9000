@@ -1413,6 +1413,7 @@ Function.UI.PumpInput {
             IfCondition Or(EqualTo(key, 10), EqualTo(key, 13)) ThenBlock: {
                 IfCondition GreaterThan(len, 0) ThenBlock: {
                     SetByte(UILayout.input_buf, len, 0)
+                    UILayout.input_len = len
                     UILayout.cursor_col = len
                     UILayout.interrupted = 1
                     dirty = 1
@@ -1774,15 +1775,22 @@ Function.UI.ConsumeInterrupt {
     Output: Address
     Body: {
         IfCondition EqualTo(UILayout.interrupted, 1) ThenBlock: {
-            user_msg = Allocate(Add(UILayout.input_len, 1))
+            copy_len = UILayout.input_len
+            IfCondition LessThan(copy_len, 0) ThenBlock: { copy_len = 0 }
+            IfCondition GreaterThan(copy_len, Subtract(UILayout.input_cap, 1)) ThenBlock: {
+                copy_len = Subtract(UILayout.input_cap, 1)
+            }
+            user_msg = Allocate(Add(copy_len, 1))
             _k = 0
-            WhileLoop LessThan(_k, UILayout.input_len) {
+            WhileLoop LessThan(_k, copy_len) {
                 SetByte(user_msg, _k, GetByte(UILayout.input_buf, _k))
                 _k = Add(_k, 1)
             }
-            SetByte(user_msg, UILayout.input_len, 0)
-            
+            SetByte(user_msg, copy_len, 0)
+
             UILayout.input_len = 0
+            UILayout.cursor_col = 0
+            SetByte(UILayout.input_buf, 0, 0)
             UILayout.interrupted = 0
             UI_AdjustPromptHeight(1)
             ReturnValue(user_msg)

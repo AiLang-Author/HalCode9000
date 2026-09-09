@@ -161,6 +161,7 @@ Function.Gemini.BuildHeaders {
                                 h4 = StringConcat(h4, "\n")
                                 h3 = StringConcat(h3, h4)
                             }
+                            JSON.Free(parsed)
                         }
                     }
                     Deallocate(buf, 8192)
@@ -271,8 +272,13 @@ Function.Gemini.OnEvent {
             }
         }
 
-        obj = JSON.AsObject(ParseJSON(event_data))
+        parsed = ParseJSON(event_data)
+        IfCondition EqualTo(parsed, 0) ThenBlock: {
+            ReturnValue(GEMINISignal.CONTINUE)
+        }
+        obj = JSON.AsObject(parsed)
         IfCondition EqualTo(obj, 0) ThenBlock: {
+            JSON.Free(parsed)
             ReturnValue(GEMINISignal.CONTINUE)
         }
 
@@ -339,6 +345,7 @@ Function.Gemini.OnEvent {
             }
         }
 
+        JSON.Free(parsed)
         ReturnValue(GEMINISignal.CONTINUE)
     }
 }
@@ -578,7 +585,12 @@ Function.Gemini.CommitAssistantToHistory {
         msg = JSON.AsObject(parsed)
         IfCondition NotEqual(msg, 0) ThenBlock: {
             History.AppendRaw(msg)
+        } ElseBlock: {
+            IfCondition NotEqual(parsed, 0) ThenBlock: {
+                JSON.Free(parsed)
+            }
         }
+        Deallocate(raw, Add(StringLength(raw), 1))
     }
 }
 

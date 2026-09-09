@@ -44,6 +44,9 @@ FixedPool.HistState {
 // =============================================================================
 Function.History.Init {
     Body: {
+        IfCondition EqualTo(HistState.initialized, 1) ThenBlock: {
+            ReturnValue(0)
+        }
         HistState.messages = JSON.NewArray()
         HistState.count = 0
         HistState.initialized = 1
@@ -160,6 +163,9 @@ Function.History_DropFront {
 // =============================================================================
 
 // {role: "user", content: "<text>"}
+// JSON.SetString aliases `text`. Callers must pass a stable buffer
+// (not the TUI input_buf unless they CC_StrDup first; not a buffer
+// they Deallocate after this returns).
 Function.History.AppendUser {
     Input: text: Address
     Body: {
@@ -290,7 +296,13 @@ Function.History.LoadFromJSON {
         parsed = ParseJSON(json_str)
         IfCondition EqualTo(parsed, 0) ThenBlock: { ReturnValue(0) }
         arr = JSON.AsArray(parsed)
-        IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(arr, 0) ThenBlock: {
+            JSON.Free(parsed)
+            ReturnValue(0)
+        }
+        // Do not JSON.Free the previous array: Append* stored string
+        // literals ("user", "assistant", "tool") via JSON.SetString,
+        // which aliases. Free would Deallocate those literals.
         HistState.messages = arr
         HistState.count = JSON.ArrayLength(arr)
         ReturnValue(1)
@@ -299,6 +311,8 @@ Function.History.LoadFromJSON {
 
 Function.History.Clear {
     Body: {
+        // Same aliasing rule as LoadFromJSON — leak the old array
+        // rather than JSON.Free trees that hold string literals.
         HistState.messages = JSON.NewArray()
         HistState.count = 0
     }

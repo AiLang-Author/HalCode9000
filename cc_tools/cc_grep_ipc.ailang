@@ -594,17 +594,18 @@ Function.CCGrep_FreePatterns {
         i = 0
         WhileLoop LessThan(i, Patterns.count) {
             p = Dereference(Add(Patterns.ptrs, Multiply(i, 8)))
-            IfCondition NotEqual(p, 0) ThenBlock: { Deallocate(p, 0) }
+            plen = Dereference(Add(Patterns.lens, Multiply(i, 8)))
+            IfCondition NotEqual(p, 0) ThenBlock: { Deallocate(p, Add(plen, 1)) }
             l = Dereference(Add(Patterns.lc_ptrs, Multiply(i, 8)))
-            IfCondition NotEqual(l, 0) ThenBlock: { Deallocate(l, 0) }
+            IfCondition NotEqual(l, 0) ThenBlock: { Deallocate(l, Add(plen, 1)) }
             r = Dereference(Add(Patterns.regex, Multiply(i, 8)))
             IfCondition NotEqual(r, 0) ThenBlock: { Regex_Free(r) }
             b = Dereference(Add(Patterns.bc_tables, Multiply(i, 8)))
-            IfCondition NotEqual(b, 0) ThenBlock: { Deallocate(b, 0) }
+            IfCondition NotEqual(b, 0) ThenBlock: { Deallocate(b, 256) }
             pfx = Dereference(Add(Patterns.rx_prefix, Multiply(i, 8)))
-            IfCondition NotEqual(pfx, 0) ThenBlock: { Deallocate(pfx, 0) }
+            IfCondition NotEqual(pfx, 0) ThenBlock: { Deallocate(pfx, 32) }
             pbc = Dereference(Add(Patterns.rx_prefix_bc, Multiply(i, 8)))
-            IfCondition NotEqual(pbc, 0) ThenBlock: { Deallocate(pbc, 0) }
+            IfCondition NotEqual(pbc, 0) ThenBlock: { Deallocate(pbc, 256) }
             i = Add(i, 1)
         }
         Patterns.count = 0

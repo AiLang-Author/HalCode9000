@@ -247,21 +247,31 @@ Function.CCFind_ProcessDir {
             pos = 0
             WhileLoop LessThan(pos, n) {
                 IfCondition GreaterEqual(CCFindState.result_count, CCFindState.max_results) ThenBlock: { BreakLoop }
+                IfCondition GreaterThan(Add(pos, 19), n) ThenBlock: { BreakLoop }
+
                 entry = Add(dirbuf, pos)
                 reclen = Add(GetByte(entry, 16), Multiply(GetByte(entry, 17), 256))
-                IfCondition EqualTo(reclen, 0) ThenBlock: { BreakLoop }
+                IfCondition Or(LessThan(reclen, 19), GreaterThan(Add(pos, reclen), n)) ThenBlock: { BreakLoop }
+
                 dtype = GetByte(entry, 18)
                 dname = Add(entry, 19)
+
+                max_namelen = Subtract(reclen, 19)
+                dname_len = 0
+                WhileLoop LessThan(dname_len, max_namelen) {
+                    IfCondition EqualTo(GetByte(dname, dname_len), 0) ThenBlock: { BreakLoop }
+                    dname_len = Add(dname_len, 1)
+                }
 
                 d0 = GetByte(dname, 0)
                 d1 = GetByte(dname, 1)
                 skip = 0
                 IfCondition EqualTo(d0, 46) ThenBlock: {
-                    IfCondition Or(EqualTo(d1, 0), EqualTo(d1, 46)) ThenBlock: { skip = 1 }
+                    IfCondition EqualTo(d1, 0) ThenBlock: { skip = 1 }
+                    IfCondition And(EqualTo(d1, 46), EqualTo(GetByte(dname, 2), 0)) ThenBlock: { skip = 1 }
                 }
 
                 IfCondition EqualTo(skip, 0) ThenBlock: {
-                    dname_len = StringLength(dname)
                     // Build child path: dir_path + "/" + dname
                     child_len = Add(Add(dir_len, dname_len), 2)
                     child = Allocate(child_len)

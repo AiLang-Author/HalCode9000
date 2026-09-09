@@ -593,14 +593,25 @@ Function.IPCDispatch.Dispatch {
     Body: {
         StoreValue(out_is_error_ptr, 0, "dword")
 
+        IfCondition EqualTo(name, 0) ThenBlock: {
+            StoreValue(out_is_error_ptr, 1, "dword")
+            ReturnValue(StringConcat("dispatch: null tool name", ""))
+        }
+
+        IPCD_Log("[ipcd] dispatch begin ")
+        IPCD_Log(name)
+        IPCD_Log("\n")
+
         fd = IPCDispatch_FindFd(name)
         IfCondition LessThan(fd, 0) ThenBlock: {
             StoreValue(out_is_error_ptr, 1, "dword")
+            IPCD_Log("[ipcd] dispatch not registered\n")
             ReturnValue(StringConcat("tool not registered: ", name))
         }
 
         // Build request. In proxy mode include "tool":name so the parent knows
         // which daemon to forward to; direct-mode daemons don't need it.
+        // Do not JSON.Free(req): SetString/SetObject alias literals and input_obj.
         req = JSON.NewObject()
         JSON.SetString(req, "method", "call")
         IfCondition EqualTo(IPCDState.proxy_mode, 1) ThenBlock: {
@@ -612,7 +623,13 @@ Function.IPCDispatch.Dispatch {
         IfCondition NotEqual(input_obj, 0) ThenBlock: {
             JSON.SetObject(req, "args", input_obj)
         }
+        IPCD_Log("[ipcd] dispatch serializing ")
+        IPCD_Log(name)
+        IPCD_Log("\n")
         req_str = JSON.SerializeObject(req)
+        IPCD_Log("[ipcd] dispatch serialized ")
+        IPCD_Log(name)
+        IPCD_Log("\n")
 
         sr = Socket.SendMsg(fd, req_str)
         IfCondition LessThan(sr, 0) ThenBlock: {
@@ -625,9 +642,19 @@ Function.IPCDispatch.Dispatch {
             }
             IfCondition LessThan(sr, 0) ThenBlock: {
                 StoreValue(out_is_error_ptr, 1, "dword")
+                IPCD_Log("[ipcd] dispatch send failed\n")
+                IfCondition NotEqual(req_str, 0) ThenBlock: {
+                    Deallocate(req_str, Add(StringLength(req_str), 1))
+                }
                 ReturnValue(StringConcat("send failed to: ", name))
             }
         }
+        IfCondition NotEqual(req_str, 0) ThenBlock: {
+            Deallocate(req_str, Add(StringLength(req_str), 1))
+        }
+        IPCD_Log("[ipcd] dispatch sent ")
+        IPCD_Log(name)
+        IPCD_Log("\n")
 
         // Per-tool timeout. Default 60s covers real work (relmem indexing, web fetches)
         // and unblocks hangs. Sleep is special: it intentionally waits up to 310s
@@ -654,12 +681,18 @@ Function.IPCDispatch.Dispatch {
         Deallocate(pfd, 8)
 
         Socket.SetRecvTimeout(fd, 1000)
+        IPCD_Log("[ipcd] dispatch recv ")
+        IPCD_Log(name)
+        IPCD_Log("\n")
         resp_str = Socket.RecvMsg(fd)
         t_end = SystemCall(201, 0, 0, 0, 0, 0)
         elapsed = Subtract(t_end, t_start)
 
         IfCondition EqualTo(resp_str, 0) ThenBlock: {
             StoreValue(out_is_error_ptr, 1, "dword")
+            IPCD_Log("[ipcd] dispatch disconnected ")
+            IPCD_Log(name)
+            IPCD_Log("\n")
             IPCDispatch_Reconnect(name)
             IfCondition GreaterEqual(elapsed, tool_timeout) ThenBlock: {
                 ReturnValue(StringConcat("tool TIMED OUT: ", name))
@@ -672,6 +705,9 @@ Function.IPCDispatch.Dispatch {
         // the model sees something useful instead of us hanging.
         IfCondition EqualTo(resp_str, -1) ThenBlock: {
             StoreValue(out_is_error_ptr, 1, "dword")
+            IPCD_Log("[ipcd] dispatch too large ")
+            IPCD_Log(name)
+            IPCD_Log("\n")
             ReturnValue(StringConcat("tool response too large (>64KB): ", name))
         }
         // Slow-tool flag: only emit if we crossed 5s, so fast tools stay quiet.
@@ -683,15 +719,25 @@ Function.IPCDispatch.Dispatch {
             UI.ChatPrintln(slow_msg)
         }
 
+        IPCD_Log("[ipcd] dispatch parse ")
+        IPCD_Log(name)
+        IPCD_Log(" len=")
+        IPCD_Log(NumberToString(StringLength(resp_str)))
+        IPCD_Log("\n")
         parsed = ParseJSON(resp_str)
+        IPCD_Log("[ipcd] dispatch parsed ")
+        IPCD_Log(name)
+        IPCD_Log("\n")
         IfCondition EqualTo(parsed, 0) ThenBlock: {
             StoreValue(out_is_error_ptr, 1, "dword")
-            ReturnValue("invalid JSON response from tool")
+            IPCD_Log("[ipcd] dispatch invalid json\n")
+            ReturnValue(StringConcat("invalid JSON response from tool", ""))
         }
         obj = JSON.AsObject(parsed)
         IfCondition EqualTo(obj, 0) ThenBlock: {
             StoreValue(out_is_error_ptr, 1, "dword")
-            ReturnValue("tool response was not an object")
+            IPCD_Log("[ipcd] dispatch not object\n")
+            ReturnValue(StringConcat("tool response was not an object", ""))
         }
 
         ok = JSON.GetBool(obj, "ok")
@@ -701,15 +747,21 @@ Function.IPCDispatch.Dispatch {
                 // No "content" field — ops like search/tree/task_list return
                 // {"ok":true,"rows":[...]} or {"ok":true,"tasks":[...]} instead.
                 // Pass the full response string so the model sees the data.
+                IPCD_Log("[ipcd] dispatch ok (raw resp)\n")
                 ReturnValue(resp_str)
             }
+            IPCD_Log("[ipcd] dispatch ok\n")
             ReturnValue(content)
         }
 
         // ok = false  -> error path
         StoreValue(out_is_error_ptr, 1, "dword")
         err = JSON.GetString(obj, "error")
-        IfCondition EqualTo(err, 0) ThenBlock: { ReturnValue("tool returned error (no detail)") }
+        IfCondition EqualTo(err, 0) ThenBlock: {
+            IPCD_Log("[ipcd] dispatch err no detail\n")
+            ReturnValue(StringConcat("tool returned error (no detail)", ""))
+        }
+        IPCD_Log("[ipcd] dispatch err\n")
         ReturnValue(err)
     }
 }
