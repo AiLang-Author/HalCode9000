@@ -1,8 +1,7 @@
 # HalCode GUI — chrome shell over the AILang kernel
 
-> Status: **draft / not for implementation today.**
-> When we do it: thin per-OS chrome + blit; kernel stays AILang. Same kernel
-> on Linux (GTK) and Haiku (BeAPI).
+> Status: **phase 1 started.** Thin GTK blit host lives in `shell/`.
+> Kernel stays AILang. Same kernel on Linux (GTK) and Haiku (BeAPI).
 
 **One line:** two processes — a thin `halcode_shell_*` (native window chrome +
 Cairo/BeAPI blit) and `HalCode9000.x` as the kernel running AppDesk MDI +
@@ -191,4 +190,4 @@ port.
 | 5 | `--agent` / `--mcp` stay headless | firm |
 | 6 | Linux shell = GTK; Haiku shell = BeAPI | firm |
 | 7 | Do not invent a new BSP/cell-grid kernel | firm |
-| 8 | Implementation: *not today* | firm |
+| 8 | Phase 1: `shell/halcode_shell_gtk` + CAD `frame.raw` hello | in progress |
