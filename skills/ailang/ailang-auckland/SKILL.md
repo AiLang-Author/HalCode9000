@@ -1,15 +1,13 @@
 ---
 name: ailang-auckland
-description: Auckland UI layout engine and simplified HTML GUI for Ailang-Self-Hosting Display system. Use whenever working on Library.Auckland*, AucklandBind, AucklandEvent, config/*.html app markup, AppHost, TextRegion draw paths, widget tags (button, textfield, canvas, etc.), or expanding the Display UI toolkit. Also use for Display/Relmem/Pgmem tasks involving Auckland inventory, layout solver, or HTML-to-widget binding — even if the user says "UI", "markup", "deskbar", or "window content".
+description: Auckland UI layout engine and simplified HTML GUI for Ailang-Self-Hosting Display. Use when working on Library.Auckland*, AucklandBind, AucklandEvent, config/*.html app markup, AppHost, TextRegion draw paths, or widget tags (button, textfield, input, docview, scroll, canvas, etc.).
 ---
 
 # Auckland Display UI
 
 Load **`ailang/ailang-dev`** first for general AILANG syntax (6-arg ABI, StoreValue, flattened expressions).
 
-Persistent context: `Pgmem pickup key=auckland-inventory` or read `/home/bob/Ailang-Self-Hosting-/AUCKLAND_INVENTORY.md`.
-
-Symbol lookup: `Relmem op=where symbol=AK_DrawNode` (index path: `Librarys/Display`).
+Inventory (may be stale — prefer sources): `/home/bob/Ailang-Self-Hosting-/docs/display/AUCKLAND_INVENTORY.md`.
 
 ---
 
@@ -32,8 +30,8 @@ Entry point for apps: `AppHost_Open(html_file, action_cb)` in `Librarys/Library.
 | Task | Read first |
 |------|------------|
 | New widget draw | `UI/Library.Auckland.ailang` → `AK_DrawNode` |
-| New HTML attr/tag | `UI/Library.AucklandBind.ailang` → `AKBind_ApplyAttr`, `AKBind_TagNameToAKTag` |
-| Input/events | `UI/Library.AucklandEvent.ailang` → `AK_HitWalk`, `AK_EventMouse` |
+| New HTML attr/tag | `UI/Library.AucklandBind.ailang` → `AKBind_ApplyAttr`, `AKBind_TagNameToAKTag1`/`2` |
+| Input/events | `UI/Library.AucklandEvent.ailang` → `AK_HitWalk`, `AK_EventMouse`, `AK_IsHittable` |
 | Text rendering | `UI/Library.TextRegion.ailang` |
 | App from HTML | `Librarys/Library.AppHost.ailang` |
 | Example markup | `config/settings.html`, `config/notepad.html` |
@@ -52,14 +50,15 @@ Core paths (repo root `Ailang-Self-Hosting-`):
 - Fields via `AK_Get(ctx, node, AKF.*)` / `AK_Set` and `AK_ExtraGet` / `AK_ExtraSet`.
 - Render: `AK_Draw(ctx, canvas, canvas_w, canvas_h)` calls solve then draw.
 - Mark dirty after dynamic changes: `AK_Set(ctx, node, AKF.DIRTY, 1)`.
+- Lookup: `AK_FindById(ctx, id_str)` exists in `Library.Auckland.ailang` (DJB2 hash, node index or -1).
 
 ---
 
-## Widget Status (2026 baseline)
+## Widget Status
 
-**Working:** `window`, `group`, `panel`, `button`, `label`, `separator`, `checkbox`, `textfield`, `spacer` (layout only).
+**Working (drawn):** `window`, `group`, `panel`, `button`, `label`, `separator`, `checkbox`, `textfield`, `input` (AKTag 23), `docview` (AKTag 24), `scroll` (draw path + clip/offset/scrollbars), `spacer` (layout only).
 
-**Stubbed (tag exists, no/full draw):** `scroll`, `tabs`, `tab`, `text`, `display`, `radio`, `slider`, `progress`, `image`, `canvas`, `theme`, `flow` layout.
+**Stubs (tag exists, no/full draw):** `tabs`, `tab`, `text`, `display`, `radio`, `slider`, `progress`, `image`, `canvas`, `theme`. `flow` is parsed, not laid out.
 
 Do not assume stubbed tags work — verify `AK_DrawNode` has an `EqualTo(tag, AKTag.X)` block.
 
@@ -68,6 +67,8 @@ Do not assume stubbed tags work — verify `AK_DrawNode` has an `EqualTo(tag, AK
 ## Canonical Patterns
 
 ### Bind a color attribute (AucklandBind)
+
+Attrs are split: `AKBind_ApplyLayout` / `ApplySize` / `ApplyStyle` / `ApplyWindow` / `ApplyTextWidget` / `ApplyInput` / `ApplyDocViewAttr`. Tag names: `AKBind_TagNameToAKTag` → `TagNameToAKTag1` then `2`.
 
 ```
 cmp_bg = StringCompare(attr_name, "bg")
@@ -82,11 +83,13 @@ Colors: `#RGB`, `#RRGGBB`, `#RRGGBBAA` → `TVG_PackColor` / packed BGRA.
 
 ### Draw a filled widget (Auckland)
 
+Use **`AK_FillRect`**, not `Draw_Pix_FillRect` (that is the clip wrapper's callee).
+
 ```
 IfCondition EqualTo(tag, AKTag.BUTTON) ThenBlock: {
     bg = AK_ExtraGet(ctx, node, AKExtra.COLOR_BG)
     IfCondition EqualTo(bg, 0) ThenBlock: { bg = Theme.ak_btn_bg }
-    Draw_Pix_FillRect(canvas, sx, sy, sw, sh, bg)
+    AK_FillRect(ctx, sx, sy, sw, sh, bg)
     // ... border, TextRegion label, state handling ...
 }
 ```
@@ -143,25 +146,22 @@ Scale: design-space values → `AK_Scale(ctx, val)` at layout/draw time.
 
 ## Events & Actions
 
-- Mouse: `AK_EventMouse(ctx, mx, my, ev)` — `AKMouseEv.MOVE/DOWN/UP`.
+- Mouse: `AK_EventMouse(ctx, mx, my, ev, data)` — **5 args**. `AKMouseEv.MOVE/DOWN/UP/WHEEL`. Wheel uses `data`.
 - Click on hittable node → `AK_FireAction` → `action` string → `ctx@action_cb` via `CallIndirect`.
-- Hittable: `button`, `label`, `text`, `checkbox`, `radio`, `slider`, `canvas`, `display`.
-- **Gap:** `textfield` not hittable — focus only at bind or `ctx@focus_node`.
-- Keyboard: `AK_EventKey` → focused `TEXTFIELD` + `TextBuf_*`.
+- Hittable (`AK_IsHittable`): `button`, `checkbox`, `textfield`, `input`, `docview`, `scroll`, plus `label`, `text`, `radio`, `slider`, `canvas`, `display`. Requires `AKFlags.ENABLED`.
+- Keyboard: `AK_EventKey` → focused `TEXTFIELD` + `INPUT` + `DOCVIEW` (`DocView_Key`). Fallback walks for first TEXTFIELD.
 
 ---
 
 ## Known Gaps (expansion backlog)
 
-1. Draw stubs: `image`, `canvas`, `radio`, `slider`, `progress`, `text`, `display`, `scroll`, `tabs`
+1. Draw stubs: `image`, `canvas`, `radio`, `slider`, `progress`, `text`, `display`, `tabs`
 2. `justify` + `flow` layout
 3. Per-node `font-size` (parsed, not used in draw)
-4. `textfield` click-to-focus
-5. No `AK_FindById` in core (FileDialog has `FD_FindNodeById`)
-6. Auckland calls `SynColor_Line` without explicit `LibraryImport.Display.UI.SyntaxColor`
-7. AucklandBind is compile-time HTML→tree, not live data binding
+4. Auckland calls `SynColor_Line` without explicit `LibraryImport.Display.UI.SyntaxColor`
+5. AucklandBind is compile-time HTML→tree, not live data binding
 
-Priority: image/canvas → form controls → justify/flow → scroll/tabs → `AK_FindById`.
+Priority: image/canvas → form controls → justify/flow → tabs.
 
 ---
 
@@ -171,12 +171,9 @@ Before editing Auckland code:
 
 1. `Skills read ailang/ailang-dev`
 2. `Skills read ailang/ailang-auckland` (this file)
-3. `Pgmem search query=auckland inventory` or read `AUCKLAND_INVENTORY.md`
-4. `Relmem op=where symbol=<TargetFunction>`
-5. Read 2 existing functions in the same file — match style exactly
-6. After edits: `Ailang op=analyze source=<abs-path-to-entry.ailang>`
-
-For leaf tasks via sub-agent: park context with `Pgmem op=park key=agent-input-<id>`, spawn `Agent`, `Sleep seconds=90`, `Pgmem op=task_get`.
+3. Prefer live sources over the inventory markdown
+4. Read 2 existing functions in the same file — match style exactly
+5. After edits: `analyzer.x <abs-path-to-entry.ailang>`
 
 ---
 
@@ -202,5 +199,7 @@ Render deps (via Auckland): `DSurface`, `DDrawPixel`, `SurfaceBlit`, `Fonts`, `V
 - Do not use C/Python control flow — use `IfCondition`/`ThenBlock`/`ElseBlock`, `WhileLoop`.
 - Do not pass more than 6 args to `SystemCall`.
 - Do not add `LibraryImport` without checking the link graph (SysDisplay pulls the full tree).
-- Do not implement a new HTML tag without: `AKTag` (if new), `AKBind_TagNameToAKTag`, `AKBind_ApplyAttr` attrs, `AK_DrawNode` case, and optionally `AK_HitWalk` + `AK_MeasureNode`.
-- Do not poll Pgmem in a loop while an Agent is running.
+- Do not implement a new HTML tag without: `AKTag` (if new), `AKBind_TagNameToAKTag1`/`2`, `AKBind_ApplyAttr` split handlers, `AK_DrawNode` case, and optionally `AK_HitWalk` + `AK_MeasureNode`.
+- Do not call `Draw_Pix_FillRect` from widget draw — use `AK_FillRect`.
+
+Copyright (c) 2026 Sean Collins, 2 Paws Machine and Engineering. SCSL.

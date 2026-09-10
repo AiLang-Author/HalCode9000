@@ -22,14 +22,13 @@ types. The caller manages fd lifecycle and buffer allocation.
 
 Two address families are supported:
 
-| Family | Constant | Use |
-|--------|----------|-----|
-| IPv4 | `AF_INET` (2) | TCP to remote hosts |
-| IPv6 | `AF_INET6` (10) | TCP via IPv6 |
-| Unix | `AF_UNIX` (1) | Local IPC (abstract namespace supported) |
+| Family | How | Use |
+|--------|-----|-----|
+| IPv4 | `SocketConstants.AF_INET` (2) | TCP to remote hosts |
+| IPv6 | `SocketConstants.AF_INET6` (10) | TCP via IPv6 |
+| Unix | **literal `1`** — **not** in `SocketConstants` | Local IPC (`@halcode/Name`) |
 
-All functions return raw syscall results. Errors are reported as negative
-return values; the library prints diagnostic messages to stdout on failure.
+`Create` maps failure to **-1**. `Connect` / `Listen` / `Accept` / `BindUnix` return the **raw syscall** (negative errno on failure). There is **no** `Socket.Poll` — daemons call `SYS_POLL=7` themselves. Keep **SOCK_STREAM + 4-byte BE length** framing. Do not add SEQPACKET.
 
 ---
 
@@ -75,8 +74,9 @@ return values; the library prints diagnostic messages to stdout on failure.
 Socket.Create(family, type)  → Integer (fd)
 ```
 
-Calls `socket(family, type, 0)`. Returns the fd on success, **-1** on failure.
-For TCP: `Socket.Create(SocketConstants.AF_INET, SocketConstants.SOCK_STREAM)`.
+Calls `socket(family, type, 0)`. Returns the fd on success, **-1** on failure
+(maps the raw errno). Unix IPC: `Socket.Create(1, 1)` = AF_UNIX + SOCK_STREAM.
+TCP: `Socket.Create(SocketConstants.AF_INET, SocketConstants.SOCK_STREAM)`.
 
 ### Build an address
 
@@ -105,11 +105,11 @@ Layout:
 ### Connect
 
 ```
-Socket.Connect(sock, addr)  → Integer (0 = success, -1 = error)
+Socket.Connect(sock, addr)  → Integer (0 = success, negative errno)
 ```
 
-Calls `connect(sock, addr, 16)`. The `addr` must be a 16-byte `sockaddr_in`
-from `CreateAddr`.
+Calls `connect(sock, addr, 16)`. Returns the **raw syscall**, not mapped to -1.
+The `addr` must be a 16-byte `sockaddr_in` from `CreateAddr`.
 
 ### Send / Recv
 
@@ -176,7 +176,7 @@ The caller must `Deallocate` the result (size 110).
 ### Connect to a Unix socket
 
 ```
-Socket.ConnectUnix(sock, path)  → Integer (0 = success, error code on failure)
+Socket.ConnectUnix(sock, path)  → Integer (raw connect result; negative errno)
 ```
 
 Builds a `sockaddr_un` from `path` and calls `connect(sock, addr, 2+strlen(path))`.
@@ -186,28 +186,28 @@ WSL2 tmpfs bug triggered by +1.
 ### Bind a Unix socket
 
 ```
-Socket.BindUnix(sock, path)  → Integer (0 = success, -1 on failure)
+Socket.BindUnix(sock, path)  → Integer (raw bind result; negative errno)
 ```
 
 Unlinks any stale socket file at `path` first (via `unlink(2)`), then calls
-`bind(sock, addr, 2+strlen(path))`.
+`bind(sock, addr, 2+strlen(path))`. Does **not** map failure to -1.
 
 ### Listen
 
 ```
-Socket.Listen(sock, backlog)  → Integer (0 = success, -1 on failure)
+Socket.Listen(sock, backlog)  → Integer (raw listen result; negative errno)
 ```
 
-Calls `listen(sock, backlog)`.
+Calls `listen(sock, backlog)`. Does **not** map failure to -1.
 
 ### Accept
 
 ```
-Socket.Accept(sock)  → Integer (client fd, or -1 on failure)
+Socket.Accept(sock)  → Integer (client fd, or negative errno)
 ```
 
-Calls `accept(sock, NULL, NULL)`. Returns a **new fd** for the accepted
-connection. The caller must `Socket.Close` the returned fd when done.
+Calls `accept(sock, NULL, NULL)`. Returns a **new fd** or the raw errno.
+Does **not** map failure to -1. The caller must `Socket.Close` the returned fd when done.
 
 ---
 
@@ -219,10 +219,11 @@ framing protocol. This is used by HalCode9000's IPC dispatch system.
 ### Send a message
 
 ```
-Socket.SendMsg(sock, json_str)  → Integer (bytes sent, or -1)
+Socket.SendMsg(sock, json_str)  → Integer (payload bytes sent, or -1)
 ```
 
-Sends a 4-byte big-endian length header followed by the payload. The length
+Sends a 4-byte big-endian length header followed by the payload. Return value
+is the **payload** `write` only — the header send is discarded. The length
 is the byte count of `json_str` (retrieved via `StringLength`).
 
 Wire format:
@@ -245,7 +246,9 @@ If the declared length exceeds **1 MiB** (1,048,576), the library assumes a
 framing error: it drains up to 1 MiB from the socket to attempt
 resynchronization and returns **-1**.
 
-Returns **0** if the peer disconnected (short read on header or payload).
+Returns **0** if the peer disconnected (short read on header or payload)
+**or** if the decoded length is `<= 0` — same as disconnect; do not treat
+a zero/negative length as a framing error (`-1` is only the >1 MiB path).
 
 ---
 
@@ -255,9 +258,11 @@ Returns **0** if the peer disconnected (short read on header or payload).
 Socket.SetNonBlock(fd)  → Integer (fcntl result)
 ```
 
-Calls `fcntl(fd, F_SETFL, O_NONBLOCK)` (syscall 72). After this, `Recv` and
-`Send` return immediately with -1 and errno EAGAIN/EWOULDBLOCK if the
-operation would block. The caller must implement polling or an event loop.
+Calls `fcntl(fd, F_SETFL, O_NONBLOCK)` (syscall 72, `F_SETFL=4`,
+`O_NONBLOCK=2048`). **Replaces** flags — no `F_GETFL` OR. After this,
+`Recv` and `Send` return immediately with a negative errno (EAGAIN/
+EWOULDBLOCK) if the operation would block. There is **no** `Socket.Poll`;
+daemons use `SystemCall(7, pfd, n, timeout_ms, …)` (`SYS_POLL`) themselves.
 
 ---
 
@@ -319,14 +324,14 @@ Socket.Close sock
 LibraryImport.Socket
 LibraryImport.StringUtils
 
-sock = Socket.Create(1, SocketConstants.SOCK_STREAM)  # AF_UNIX=1
+sock = Socket.Create(1, 1)  # AF_UNIX=1, SOCK_STREAM=1 — AF_UNIX is not in SocketConstants
 IfCondition LessThan(sock, 0) ThenBlock: {
     StringUtils.PrintString "[Socket] Create failed\n"
     ReturnValue(1)
 }
 
 # Abstract socket (no filesystem inode)
-Socket.BindUnix sock "@myapp_ipc"
+Socket.BindUnix sock "@halcode/Name"
 Socket.Listen sock 128
 
 WhileLoop 1 {
@@ -350,8 +355,8 @@ LibraryImport.Socket
 LibraryImport.JSON
 LibraryImport.StringUtils
 
-sock = Socket.Create(1, SocketConstants.SOCK_STREAM)
-Socket.ConnectUnix sock "@myapp_ipc"
+sock = Socket.Create(1, 1)
+Socket.ConnectUnix sock "@halcode/Name"
 
 # Build JSON request
 JSON.NewObject → req

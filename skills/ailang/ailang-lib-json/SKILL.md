@@ -1,316 +1,84 @@
 ---
 name: ailang-lib-json
-description: Library.JSON — RFC 8259 JSON parser and builder. Load when parsing or building JSON in backends or cc_tools. NOTE: has XSHash collision bug (see top of file).
+description: Library.JSON tagged-value parser/builder. Load when parsing or building JSON in backends or cc_tools. SetString aliases; Free vs FreeObject/FreeArray; numbers are Integer not strings.
 ---
-
-> **KNOWN BUG — XSHash collision: `"name"` and `"index"` map to the same bucket.**
-> Any JSON object containing both fields will silently drop one. Workarounds already
-> applied in HalCode9000: Anthropic backend uses parallel `tool_names[]`/`tool_ids[]`
-> arrays; OpenAI and Gemini backends build assistant messages via raw `StringConcat`
-> + `JSON.EscapeString` then re-parse, bypassing XSHash entirely. If you add any new
-> field named `"name"` to a JSON object that also has `"index"`, test it carefully.
 
 # Library.JSON (ailang)
 
-## NAME
-`Library.JSON` — RFC 8259 JSON parser and builder using tagged-value DOM
+Ground truth: `/home/bob/Ailang-Self-Hosting-/Librarys/Library.JSON.ailang`.
+There is **no** `"name"`/`"index"` hash-drop bug in current JSON. Objects are `SHash` with chaining + `StringCompare`. Sibling-key loss in HalCode was nested `SetString` **register clobber**, not a hash collision.
 
-## SYNOPSIS
-```ailang
+```
 LibraryImport.JSON
 ```
-> Requires: `LibraryImport.XArrays`, `LibraryImport.StringUtils`
 
-## DESCRIPTION
+Requires: `LibraryImport.Arrays`, `LibraryImport.StringUtils`. **Not** HashMap or XArrays.
 
-JSON provides a complete RFC 8259-compliant parser and serializer built on a
-**tagged-value** representation. Every JSON value is a 16-byte heap allocation:
+## Tagged vs untagged
 
-| Offset | Size | Field |
-|--------|------|-------|
-| 0–7  | 8 bytes | Type tag (one of the `JType` constants) |
-| 8–15 | 8 bytes | Value: `Address` for strings/objects/arrays, `Integer` for numbers/bools |
+Every **parsed** value is a 16-byte tag+payload:
 
-### Type tags (`JType`)
-
-| Constant | Value | Payload |
-|----------|-------|---------|
-| `JType.NULL`   | 0 | — |
-| `JType.STRING` | 1 | Address of null-terminated String |
-| `JType.NUMBER` | 2 | Address of raw number literal String |
-| `JType.BOOL`   | 3 | Integer: 0 or 1 |
-| `JType.OBJECT` | 4 | Address of HashMap (String→value) |
-| `JType.ARRAY`  | 5 | Address of XArray of tagged values |
-
-Objects are backed by `Library.HashMap`; arrays are backed by `Library.XArrays`.
-
----
-
-## VALUE CONSTRUCTION
-
-### Creating containers
-
-```ailang
-JSON.NewObject   → obj       # empty JSON object (HashMap-backed)
-JSON.NewArray    → arr       # empty JSON array  (XArray-backed)
-```
-
-### Setting fields on objects
-
-All `Set*` functions take `obj: Address, key: Address, value`. The key must be a
-null-terminated String (not a JSON string value).
-
-| Function | Value type |
-|----------|------------|
-| `JSON.SetString(obj, key, s)`   | String |
-| `JSON.SetNumber(obj, key, n)`   | String (raw literal) |
-| `JSON.SetBool(obj, key, b)`     | Integer (0 or 1) |
-| `JSON.SetNull(obj, key)`        | — |
-| `JSON.SetObject(obj, key, v)`   | JSON object value |
-| `JSON.SetArray(obj, key, v)`    | JSON array value |
-
-### Appending to arrays
-
-All `Push*` functions take `arr: Address, value` and return the new array length.
-
-| Function | Value type |
-|----------|------------|
-| `JSON.PushString(arr, s)`   | String |
-| `JSON.PushNumber(arr, n)`   | String (raw literal) |
-| `JSON.PushBool(arr, b)`     | Integer (0 or 1) |
-| `JSON.PushNull(arr)`        | — |
-| `JSON.PushObject(arr, v)`   | JSON object value |
-| `JSON.PushArray(arr, v)`    | JSON array value |
-
----
-
-## VALUE ACCESS (type-checked)
-
-Each `Get*` accessor returns the typed payload or **0 / nil** if the key is
-missing or the stored value is of a different type.
-
-### Reading object fields
-
-| Function | Returns |
-|----------|---------|
-| `JSON.GetString(obj, key)`  | Address (String) or 0 |
-| `JSON.GetNumber(obj, key)`  | Address (raw literal String) or 0 |
-| `JSON.GetBool(obj, key)`    | Integer (0 or 1) or 0 |
-| `JSON.GetObject(obj, key)`  | Address (JSON object) or 0 |
-| `JSON.GetArray(obj, key)`   | Address (JSON array) or 0 |
-| `JSON.GetType(obj, key)`    | Integer 0–5 (JType tag) |
-
-### Reading array elements
-
-| Function | Returns |
-|----------|---------|
-| `JSON.ArrayGet(arr, index)` | Address (tagged value) or 0 if OOB |
-| `JSON.ArrayLength(arr)`    | Integer (element count) |
-
-### Type casting / unwrapping
-
-After retrieving a tagged value (e.g. from `ArrayGet`), cast it to the expected type:
-
-| Function | Returns |
-|----------|---------|
-| `JSON.AsObject(v)`  | Address (object/HashMap) or 0 |
-| `JSON.AsArray(v)`   | Address (array/XArray) or 0 |
-| `JSON.AsString(v)`  | Address (String) or 0 |
-| `JSON.AsNumber(v)`  | Address (raw number String) or 0 |
-| `JSON.AsBool(v)`    | Integer (0 or 1) or 0 |
-
-### Tag introspection (rarely needed)
-
-```
-JSON.Tag(v)      → Integer  (type tag 0–5)
-JSON.TagType(v)   → Integer  (same as Tag)
-JSON.TagValue(v)  → Address  (raw payload at offset 8)
-```
-
----
-
-## SERIALIZATION
-
-```
-JSON.Serialize(v)         → Address (compact JSON String, caller frees)
-JSON.EscapeString(s)      → Address (JSON-escaped copy of String)
-JSON.SerializeObject(obj) → Address (serializes to `{...}`, caller frees)
-JSON.SerializeArray(arr)  → Address (serializes to `[...]`, caller frees)
-```
-
-`Serialize` delegates to `SerializeObject` or `SerializeArray` based on the
-type tag. All three return a freshly allocated String the caller must free.
-
-`EscapeString` produces a JSON-safe quoted form with backslash escapes for
-`"`, `\`, `/`, newline, carriage-return, tab, backspace, and form-feed.
-Non-ASCII bytes (≥0x80) are emitted as `\u00XX` escapes.
-
----
-
-## PARSING
-
-```
-JSON.ParseJSON(text)    → Address (root tagged value, or 0 on error)
-JSON.ParseValue(text)   → Address (next value at current JParse.pos)
-JSON.ParseObject(text)  → Address (object at current JParse.pos)
-JSON.ParseArray(text)   → Address (array at current JParse.pos)
-JSON.ParseString(text)  → Address (string at current JParse.pos)
-JSON.ParsePrimitive(text) → Address (null/true/false/number at current pos)
-```
-
-### Parser state (`JParse`)
-
-Parsing uses a shared global state pool. Before calling `ParseJSON`, the
-caller must set:
-
-| Field | Meaning |
-|-------|---------|
-| `JParse.buffer` | Address of the raw JSON text |
-| `JParse.size`   | Integer: total byte length of the text |
-| `JParse.pos`    | **Must** be set to 0 before `ParseJSON` |
-| `JParse.error`  | Set to 1 by the parser on failure |
-| `JParse.error_msg` | Address of error message string (set on failure) |
-
-`ParseJSON` resets `JParse.pos` to 0 internally. After a successful parse,
-`JParse.error` is 0 and `JParse.error_msg` is 0.
-
-### Low-level / internal parsers
-
-These operate from the current `JParse.pos` and advance it:
-
-```
-JSON.SkipWhitespace()   → void    (skips spaces, tabs, newlines, carriage returns)
-JSON.BuildObject()       → Address (creates empty HashMap-backed object)
-JSON.BuildArray()        → Address (creates empty XArray-backed array)
-JSON.ParseDataField()    → Address (parses "key": value, used internally)
-```
-
----
-
-## CLEANUP
-
-```
-JSON.Free(v)        → Recursively frees a tagged value tree
-JSON.FreeObject(obj) → Frees an object and all its values
-JSON.FreeArray(arr)  → Frees an array and all its elements
-```
-
-`Free` dispatches based on the type tag (calls `FreeObject` or `FreeArray` for
-containers, deallocates strings, etc.). After a `Free`, the value pointer is
-**invalid** — do not reuse.
-
----
-
-## MEMORY
-
-| Allocation | Freed by |
+| Offset | Field |
 |---|---|
-| Tagged value nodes (16 bytes) | `JSON.Free` (or the container-specific free) |
-| String values | `JSON.Free` (container traversal) |
-| Serialization output | **Caller** must `Deallocate` the returned String |
-| Parse error message | Internal; overwritten on next parse |
+| 0–7 | `JType` (NULL=0 STRING=1 NUMBER=2 BOOL=3 OBJECT=4 ARRAY=5) |
+| 8–15 | payload |
 
----
+`JSON.NewObject` / `JSON.NewArray` return **untagged** containers (SHash / Array). Do not pass them to `JSON.Serialize` or `JSON.Free`.
 
-## EXAMPLE: Build and serialize
+| You have | Serialize with | Free with |
+|---|---|---|
+| tagged parse tree (`ParseJSON`) | `JSON.Serialize(v)` | `JSON.Free(v)` |
+| `NewObject` SHash | `JSON.SerializeObject(obj)` | `JSON.FreeObject(obj)` |
+| `NewArray` Array | `JSON.SerializeArray(arr)` | `JSON.FreeArray(arr)` |
 
-```ailang
-LibraryImport.JSON
-LibraryImport.StringUtils
+## Ownership (HalCode actually burned here)
 
-# Build a response object
-JSON.NewObject  → obj
-JSON.SetString  obj  "status"   "ok"
-JSON.SetNumber  obj  "count"    "42"
-JSON.SetBool    obj  "cached"   0
+- **`JSON.SetString` aliases.** The value pointer is stored as-is. Only the **key** is copied inside `SHash.Insert`.
+- **`JSON.Free` on STRING does `Deallocate(value, strlen+1)`.** Do not Free a tree that still holds literals or live buffers. Heap-copy (`CC_StrDup` / `Allocate`+copy) anything you store then Free.
+- **`Deallocate(p, 0)` is Arena Free24**, not auto-size. Serialize output: `Deallocate(out, StringLength(out)+1)`.
 
-# Push into an array
-JSON.NewArray   → arr
-JSON.PushString arr  "alpha"
-JSON.PushString arr  "beta"
-JSON.PushString arr  "gamma"
-JSON.SetArray   obj  "items"  arr
+## Construction
 
-# Serialize
-out = JSON.Serialize(obj)
-StringUtils.PrintString out   # {"status":"ok","count":42,"cached":false,"items":["alpha","beta","gamma"]}
-Deallocate out, 0
-JSON.Free obj
+```
+obj = JSON.NewObject()
+JSON.SetString(obj, key, s)     // s must stay alive or be heap-owned
+JSON.SetNumber(obj, key, n)     // n is Integer, not a string
+JSON.SetBool(obj, key, b)
+JSON.SetNull(obj, key)
+JSON.SetObject(obj, key, v)
+JSON.SetArray(obj, key, v)
+
+arr = JSON.NewArray()
+JSON.PushString(arr, s)         // no Output (does not return length)
+JSON.PushNumber(arr, n)         // n is Integer
 ```
 
-## EXAMPLE: Parse and walk
+Getters: `GetString`/`GetNumber`/`GetBool`/`GetObject`/`GetArray`/`GetType`.
+`GetNumber` / `AsNumber` return **Integer** (via `StringToNumber` on parse).
+`ArrayGet(arr, i)` / `ArrayLength(arr)`.
+Introspection: `JSON.TagType(v)`, `JSON.TagValue(v)`. `JSON.Tag(vtype, value)` is a **constructor**, not a getter.
 
-```ailang
-LibraryImport.JSON
-LibraryImport.StringUtils
+## Parse / serialize
 
-# Set up parser state
-JParse.buffer = text
-JParse.size   = StringUtils.StringLength(text)
-JParse.pos    = 0
-
-result = JSON.ParseJSON(text)
-IfCondition EqualTo(result, 0) ThenBlock: {
-    StringUtils.PrintString "[ERROR] "
-    StringUtils.PrintString JParse.error_msg
-    StringUtils.PrintString "\n"
-    ReturnValue(1)
-}
-
-obj   = JSON.AsObject(result)
-name  = JSON.GetString(obj, "name")       # "Alice"
-scores = JSON.GetArray(obj, "scores")     # [95, 87, 91]
-len   = JSON.ArrayLength(scores)          # 3
-first = JSON.ArrayGet(scores, 0)          # tagged value for 95
-n     = JSON.AsNumber(first)              # "95" (raw literal)
-
-JSON.Free result
+```
+root = ParseJSON(text)          // Function.ParseJSON — sets JParse itself
+                                // 0 on error; check JParse.error / error_msg
+out  = JSON.SerializeObject(obj)
 ```
 
-## EXAMPLE: Parse → tweak → re-serialize
+Do not pre-set `JParse.buffer` before `ParseJSON`. Parse helpers (`ParseValue`, …) take **no** text argument; they use `JParse.*`.
 
-```ailang
-JParse.buffer = text
-JParse.size   = StringUtils.StringLength(text)
-JParse.pos    = 0
+`JSON.EscapeString` copies with `"` `\` `\n` `\r` `\t` and `<32` as `\uXXXX`. It does **not** quote; `Serialize` adds quotes. No `/` escape, no high-byte `\u`.
 
-root = JSON.ParseJSON(text)
-obj  = JSON.AsObject(root)
-JSON.SetString obj  "extra"  "added"
-JSON.SetBool   obj  "flag"   1
-out = JSON.Serialize(root)
-# use out...
-Deallocate out, 0
-JSON.Free root
+`JSON.BuildObject` / `BuildArray` are serialize wrappers, not empty-container constructors.
+
+## Example (untagged object — HalCode style)
+
 ```
-
----
-
-## CONSTANTS
-
-| Pool | Constant | Value |
-|------|----------|-------|
-| JType | NULL   | 0 |
-| JType | STRING | 1 |
-| JType | NUMBER | 2 |
-| JType | BOOL   | 3 |
-| JType | OBJECT | 4 |
-| JType | ARRAY  | 5 |
-
----
-
-## SEE ALSO
-- `Library.StringUtils` — string length, printing, concatenation
-- `Library.HashMap` — backing store for JSON objects
-- `Library.XArrays` — backing store for JSON arrays
-- `Library.HTTP` — transport that typically carries JSON payloads
-- `Library.Socket` — low-level TCP transport
-
----
-
-## VERSION
-2026-05-16 — rewritten to match actual v2.2 tagged-value API
-
-## COPYRIGHT
-Copyright (c) 2025–2026 Sean Collins, 2 Paws Machine and Engineering.
-Licensed under the Sean Collins Software License (SCSL).
+obj = JSON.NewObject()
+JSON.SetString(obj, "status", owned_ok)   // owned_ok is heap, not a literal if you Free
+JSON.SetNumber(obj, "count", 42)
+out = JSON.SerializeObject(obj)
+JSON.FreeObject(obj)
+Deallocate(out, Add(StringLength(out), 1))
+```

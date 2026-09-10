@@ -179,14 +179,13 @@ persists for the lifetime of the handle.
 Function.Regex_DFASearch
     Input:  text:     Address   // bytes to search
     Input:  text_len: Integer   // number of bytes
-    Output: Integer             // 1 = match, 0 = no match, -1 = overflow
+    Output: Integer             // 1 = match, 0 = miss, -1 = overflow
 ```
 
 Unanchored search via the lazy DFA. Per-byte cost is one table lookup
-(address arithmetic + `Dereference`). On DFA state overflow (more than
-`DFA.cap` = 1024 distinct NFA state sets encountered) returns `-1` —
-caller should fall back to `Regex_Search` for the remainder of the
-input.
+(address arithmetic + `Dereference`). Returns **1** on hit, **0** on
+miss, **-1** on overflow (`DFA.cap` = 1024). Treat as: `d>0` hit,
+`d==0` miss, else NFA fallback. **Never** `d>=0` as hit (0-hit bug).
 
 `Regex_DFAInit` must have been called successfully before using this
 function.
@@ -225,7 +224,7 @@ internally by grep's `REGEX_PREFIX_BM` strategy.
 ```
 Function.Regex_Free
     Input:  regex: Address   // handle from Regex_Compile
-    Output: Integer          // 1 on success, 0 if regex was null
+    // no Output: in source (still ReturnValue 1 / 0 if regex was null)
 ```
 
 Frees the NFA state table and handle header allocated by
@@ -261,12 +260,18 @@ IfCondition EqualTo(h, 0) ThenBlock: {
 // Optional: init DFA for single-pattern hot path
 dfa_ok = Regex_DFAInit(h)
 
-// Per-line search
+// Per-line search. DFASearch: 1 = match, 0 = miss, -1 = overflow.
+// Never treat d >= 0 as a hit — 0 is a miss (0-hit bug).
 IfCondition EqualTo(dfa_ok, 1) ThenBlock: {
-    result = Regex_DFASearch(line, line_len)
-    IfCondition LessThan(result, 0) ThenBlock: {
-        // DFA overflow — fall back
-        result = Regex_Search(h, line, line_len)
+    d = Regex_DFASearch(line, line_len)
+    IfCondition GreaterThan(d, 0) ThenBlock: {
+        result = 1
+    } ElseBlock: {
+        IfCondition EqualTo(d, 0) ThenBlock: {
+            result = 0
+        } ElseBlock: {
+            result = Regex_Search(h, line, line_len)
+        }
     }
 } ElseBlock: {
     result = Regex_Search(h, line, line_len)
@@ -310,7 +315,7 @@ DFA.cap                      // 1024 — max lazy DFA states before overflow
 ## SEE ALSO
 
 `Library.Arena`,
-`grep.ailang` (consumer of this library),
+`cc_tools/cc_grep_ipc.ailang` (consumer; `Match_RegexDFA`),
 `Library.StringUtils`
 
 ---

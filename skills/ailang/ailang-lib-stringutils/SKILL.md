@@ -254,6 +254,36 @@ StringTrim("hello")         // → "hello"
 
 ---
 
+### SPLITTING
+
+---
+
+#### `StringSplitField`
+
+```
+Function.StringSplitField
+    Input:  s:     Address
+    Input:  delim: Integer   // single delimiter byte
+    Input:  n:     Integer   // 0-indexed field
+    Output: Address          // new allocated string
+```
+
+Returns the Nth field of `s`, split on `delim` (a single byte).
+Fields are 0-indexed. Empty fields count (two delims in a row yield
+an empty middle field). If `n` is past the last field, returns an
+allocated empty string — check with `StringLength == 0`. Result is
+a fresh Arena-backed buffer; `s` is not modified.
+
+**Examples:**
+```
+StringSplitField("a,b,c", 44, 0)   // → "a"   (',' = 44)
+StringSplitField("a,b,c", 44, 2)   // → "c"
+StringSplitField("a,,c",  44, 1)   // → ""
+StringSplitField("a,b",   44, 9)   // → ""
+```
+
+---
+
 ### REPEAT
 
 ---
@@ -291,6 +321,7 @@ StringRepeat("x",  0)    // → ""
 | `StringPadLeft` | `s`, `width`, `pad_char` | `Address` | Right-align with padding |
 | `StringPadRight` | `s`, `width`, `pad_char` | `Address` | Left-align with padding |
 | `StringTrim` | `s` | `Address` | Strip leading/trailing whitespace |
+| `StringSplitField` | `s`, `delim`, `n` | `Address` | 0-indexed field split on a byte |
 | `StringRepeat` | `s`, `count` | `Address` | Repeat string N times |
 
 ---

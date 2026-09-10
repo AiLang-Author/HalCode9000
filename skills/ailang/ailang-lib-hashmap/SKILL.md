@@ -1,153 +1,57 @@
 ---
 name: ailang-lib-hashmap
-description: Library.HashMap — general-purpose string-keyed hash map. Load when building data structures that need O(1) lookup.
+description: HashMap is deprecated. Use Library.Hash (LibraryImport.Hash). Load for Hash.New/Create/Set/Get string-keyed maps. IHash/SHash live in Arrays.
 ---
 
-# Library.HashMap(ailang)
+# HashMap is deprecated
 
-## NAME
-`Library.HashMap` — external open-addressing hash map with Int:Any mapping, backed by THash
+Use `Library.Hash`. There is no `LibraryImport.HashMap`.
 
-## SYNOPSIS
+Ground truth: `/home/bob/Ailang-Self-Hosting-/Librarys/Library.Hash.ailang`.
+
 ```
-LibraryImport.HashMap
+LibraryImport.Hash
 ```
-> Requires: `LibraryImport.THash`, `LibraryImport.XArrays`
 
-## DESCRIPTION
-HashMap provides a general-purpose key-value store mapping `Integer` keys to `Address` values (type-erased `Any`). It uses open addressing with linear probing and a power-of-two capacity, built on top of the THash mixing function for key hashing and XArrays for dynamic storage.
+Requires `LibraryImport.Array` (Keys/Values return Array). Hash itself already imports Array.
 
-Keys and values are stored in parallel arrays (parallel-array open addressing). Deleted slots use a sentinel tombstone distinct from the nil sentinel.
+Open-addressing string hash table, hardware CRC32, linear probing, tombstones, auto-resize at 70% load. Capacity is power-of-two, min 8.
 
-| Concept | Detail |
+| | |
 |---|---|
-| Key type | Integer |
-| Value type | Address (Any) |
-| Collision strategy | Linear probing, power-of-two capacity |
-| Load factor | 0.70 max before grow |
-| Grow factor | 2× (double capacity) |
-| Hash function | THash.mix64 |
-| Tombstone | Reserved -1 sentinel for deleted slots |
+| Keys | Address (C strings). Table owns a copy. |
+| Values | Integer (ints, bools, or pointers) |
+| Missing Get | `0` — use `Contains` if `0` is a valid value |
 
-## FUNCTIONS
+## API
 
 ```
-Function.HashMap.new
-    Input:  —
-    Output: Address  (HashMap instance)
-```
-Allocates a new empty HashMap with default initial capacity (16 slots). All fields are zeroed. The returned address is an opaque handle.
+h = Hash.New()                    // Hash.Create(16)
+h = Hash.Create(capacity)         // rounded up to 2^n, min 8
 
-```
-Function.HashMap.newCapacity
-    Input:  initialCapacity: Integer
-    Output: Address
-```
-Allocates a new HashMap with the given initial capacity rounded up to the next power of two. Minimum capacity is 4. Returns nil if `initialCapacity` is ≤ 0.
+Hash.Set(h, key, value) → 1|0     // 1 = new key, 0 = update
+Hash.Get(h, key) → Integer        // 0 if missing
+Hash.Contains(h, key) → 1|0
+Hash.Delete(h, key) → 1|0         // tombstone; does not shrink
+Hash.Size(h) → Integer
+Hash.Clear(h)                     // frees keys, keeps capacity
+Hash.Destroy(h)                   // frees keys + table
 
+ks = Hash.Keys(h)                 // Array of live key pointers — do not free strings
+vs = Hash.Values(h)               // Array of Integer values
 ```
-Function.HashMap.put
-    Input:  map: Address, key: Integer, value: Address
-    Output: Integer  (1 = inserted, 0 = replaced)
-```
-Inserts a key-value pair into the map. If the key already exists, the old value is overwritten and 0 is returned. If the key is new, 1 is returned. Triggers a grow+rehash if the load factor would exceed 0.70 after insertion.
 
-```
-Function.HashMap.get
-    Input:  map: Address, key: Integer
-    Output: Address  (value, or nil)
-```
-Looks up a key. Returns the associated value address or nil if the key is absent.
+`Keys`/`Values` are fresh Arrays; caller `Array.Destroy` them. Key pointers stay valid only while that key remains in the table.
 
-```
-Function.HashMap.has
-    Input:  map: Address, key: Integer
-    Output: Integer  (1 = present, 0 = absent)
-```
-Boolean existence check — cheaper than `get` when the value is not needed.
+Also present (not required for basic use): `Hash.HashString`, `Hash.IsHash`, `Hash.Items`, `IncrBy`, `MSet`/`MGet`, nested `HSet`/`HGet`/…/`DestroyNested`.
 
-```
-Function.HashMap.remove
-    Input:  map: Address, key: Integer
-    Output: Integer  (1 = removed, 0 = not found)
-```
-Removes a key-value pair. Writes the tombstone sentinel into the slot. Returns 1 if the key was present and removed, 0 otherwise.
+## Other hash tables (LibraryImport.Arrays)
 
-```
-Function.HashMap.size
-    Input:  map: Address
-    Output: Integer
-```
-Returns the number of live (non-tombstone) entries in the map.
-
-```
-Function.HashMap.capacity
-    Input:  map: Address
-    Output: Integer
-```
-Returns the total number of slots (including empty and tombstone) in the underlying arrays.
-
-```
-Function.HashMap.keys
-    Input:  map: Address
-    Output: Address  (XArray of Integer)
-```
-Returns an XArray containing all live keys in arbitrary (probe) order. Caller must free the returned array.
-
-```
-Function.HashMap.values
-    Input:  map: Address
-    Output: Address  (XArray of Address)
-```
-Returns an XArray containing all live values in the same order as `keys`. Caller must free the returned array.
-
-```
-Function.HashMap.clear
-    Input:  map: Address
-    Output: —
-```
-Removes all entries. Does not shrink the underlying storage; capacity remains unchanged.
-
-```
-Function.HashMap.free
-    Input:  map: Address
-    Output: —
-```
-Releases all memory associated with the HashMap, including the keys array, values array, and the instance itself. Does NOT free the stored values (the caller is responsible for value lifetimes).
-
-## MEMORY
-
-| Allocation | Size | Freed by |
+| | Keys | Notes |
 |---|---|---|
-| HashMap instance | ~32 bytes | `free` |
-| Keys array | capacity × 8 | `free` |
-| Values array | capacity × 8 | `free` |
-| Grow temporary arrays | 2×old_capacity × 8 each | internal (during grow) |
+| `IHash` | Integer | chained; `Create`/`Insert`/`Lookup`/`Destroy`. Lookup miss = `XERROR` |
+| `SHash` | string | chained; used by JSON. `Create`/`Insert`/`Lookup`/`Exists`/`Delete`/`Keys`/`Destroy`. Addr variants store pointers |
 
-## EXAMPLE
+Prefer `Hash.*` for new string maps. JSON still uses `SHash`.
 
-```ailang
-LibraryImport.HashMap
-
-HashMap.new  → map
-HashMap.put  map  42  (String.literal "hello")  → _
-HashMap.put  map  99  (String.literal "world")  → _
-HashMap.get  map  42  → val
-String.print  val  # prints hello
-HashMap.has  map  99  → exists  # 1
-HashMap.remove  map  42  → _
-HashMap.size  map  → n  # 1
-HashMap.free  map
-```
-
-## SEE ALSO
-`Library.THash` — hash function used internally
-`Library.XArrays` — dynamic arrays backing the slot tables
-`Library.SortedSet` — ordered unique-key container
-
-## VERSION
-2026-05-15 — initial specification (Phase 1 Tier 1)
-
-## COPYRIGHT
-Copyright (c) 2026 Sean Collins, 2 Paws Machine and Engineering.
-Licensed under the Sean Collins Software License (SCSL).
+Copyright (c) 2026 Sean Collins, 2 Paws Machine and Engineering. Licensed under SCSL.

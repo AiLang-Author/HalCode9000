@@ -43,8 +43,9 @@ HTTP.Get(url, headers_str)  → Address (body String) or 0
 ```
 
 Sends a GET request, drains the response body into a single heap-allocated
-string, and returns it. Returns **0** on failure (curl spawn failure, non-200
-status, etc.). The caller must `Deallocate` the returned string.
+string, and returns it. Returns **0 only if curl spawn fails**. There is
+**no `-f`**: a 404 (or any HTTP status) is still a body string. The caller
+must `Deallocate` the returned string.
 
 ### POST
 
@@ -73,8 +74,8 @@ Parameters:
 - `url` — null-terminated URL string
 - `headers_str` — newline-separated header lines, or 0 for none
 - `body_str` — request body (PostStream only), or 0
-- `conn_to` — reserved (passed through, not used by curl build currently)
-- `max_to` — reserved (passed through)
+- `conn_to` — reserved unused (accepted, not passed to curl)
+- `max_to` — reserved unused (accepted, not passed to curl)
 
 The curl command assembled is:
 ```
@@ -123,8 +124,8 @@ and retry. The handle remains valid and subsequent calls will continue reading.
 HTTP.CloseStream(handle)  → void
 ```
 
-Closes the stdout pipe, waits for the curl child process (non-blocking
-`wait4`), frees the internal line buffer and handle. Safe to call on 0.
+Closes the stdout pipe, then `wait4(pid, status, flags=0, …)` — **blocking**,
+not `WNOHANG`. Frees the internal line buffer and handle. Safe to call on 0.
 
 ---
 
@@ -162,7 +163,7 @@ are needed.
 | Constant | Default | Meaning |
 |----------|---------|---------|
 | `CURL_PATH` | `/usr/bin/curl` | Path to curl binary (set before first request) |
-| `MAX_HEADERS` | 32 | Maximum header lines (internal limit) |
+| `MAX_HEADERS` | 32 | **Unused** — header count is not capped |
 | `READ_BUF_SZ` | 8192 | Internal line buffer size |
 
 ### Syscall constants (`HSys`)
@@ -181,7 +182,7 @@ The library uses raw syscall numbers: `SYS_READ`(0), `SYS_WRITE`(1),
 | Stream handle (40 bytes) | `CloseStream` |
 | Internal line buffer (8192 bytes) | `CloseStream` |
 | One-shot body string | **Caller** (`Deallocate`) |
-| Duplicated header lines (internal) | **Caller** (strings aliased into argv, freed after child exits) |
+| Duped `-H` header strings (`HTTP_DupSlice`) | **Leaked.** `HTTP_FreeArgvAfterFork` does **not** exist. Argv pointer is freed; the header copies are not. |
 
 ---
 
@@ -260,6 +261,7 @@ Deallocate line_buf, 1048576
 - `Library.JSON` — serialises/parses the bodies this library transports
 - `Library.StringUtils` — string operations for header/body manipulation
 - `Library.HTTPServer` — server-side HTTP (separate library)
+- `Library.SSE` (`Librarys/Library.SSE.ailang`) — line-driven SSE parser: `SSE.Init`, `FeedLine`, `GetEventType`, `GetEventData`, `Reset`
 
 ---
 

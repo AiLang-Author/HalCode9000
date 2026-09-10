@@ -15,8 +15,8 @@ description: AILang OOP patterns via FixedPool and Import. Load when designing o
 LibraryImport.OOP
 ```
 
-> Requires: `LibraryImport.XArrays`, `LibraryImport.TArrays`,
-> `LibraryImport.HashMap` (pulled in automatically)
+> Requires: `LibraryImport.Arrays`, `LibraryImport.Array`,
+> `LibraryImport.Hash` (pulled in automatically)
 
 ---
 
@@ -34,16 +34,16 @@ right fit for the problem.
 
 ### Object model
 
-Every object is a `HashMap` with two keys:
+Every object is a `Hash` (`Hash.Create` / `Hash.Set` / `Hash.Get`) with two keys:
 
 ```
 {
   "__class__": "ClassName"       — class name string
-  "__data__":  {field: value}    — instance field HashMap
+  "__data__":  {field: value}    — instance field Hash
 }
 ```
 
-Every class definition is a `HashMap` stored in the global
+Every class definition is a `Hash` stored in the global
 `ClassRegistry`:
 
 ```
@@ -109,7 +109,7 @@ SubRoutine.Main {
     OOP.ObjectSet(dog, "sound", "Woof")
     OOP.ObjectSet(dog, "breed", "Labrador")
 
-    args = TArray.TCreate(0)
+    args = Array.Create(0)
     OOP.MethodCall(dog, "speak", args)   // Rex says Woof
     OOP.MethodCall(dog, "fetch", args)   // Fetching!
 
@@ -269,13 +269,13 @@ obj = OOP.ObjectNewInit(class_name, init_args)
 ```
 
 Allocate a new instance and call `__init__` on it if the method
-exists. `init_args` is a `TArray` of arguments to pass (not
+exists. `init_args` is an `Array` of arguments to pass (not
 including `self`). Returns the object or `0` on failure.
 
 ```ailang
-args = TArray.TCreate(2)
-TArray.TPush(args, name_ptr)
-TArray.TPush(args, year)
+args = Array.Create(2)
+Array.Push(args, name_ptr)
+Array.Push(args, year)
 car = OOP.ObjectNewInit("Car", args)
 ```
 
@@ -329,19 +329,20 @@ Returns `1` if the field exists on the object (even if its value is
 result = OOP.MethodCall(obj, method_name, args)
 ```
 
-Call a method on an object. `args` is a `TArray` of arguments (not
-including `self` — `self` is passed automatically as the first
-argument). Walks the inheritance chain to find the method. Prints
+Call a method on an object. `args` is an `Array` (`Array.Create` /
+`Array.Push`, then `Array.Size` / `Array.Get` inside dispatch). Do
+not use `TArray.TCreate`. `self` is passed automatically as the first
+argument. Walks the inheritance chain to find the method. Prints
 an error and returns `0` if the method is not found.
 
 Supports 0–5 arguments. For more than 5, only the first 5 are passed.
 
 ```ailang
-args = TArray.TCreate(0)
+args = Array.Create(0)
 OOP.MethodCall(car, "start", args)
 
-args2 = TArray.TCreate(1)
-TArray.TPush(args2, speed)
+args2 = Array.Create(1)
+Array.Push(args2, speed)
 OOP.MethodCall(car, "accelerate", args2)
 ```
 
@@ -389,7 +390,7 @@ Function.SportsCar_Start {
     Output: Integer
     Body: {
         // Call Car's start first
-        args = TArray.TCreate(0)
+        args = Array.Create(0)
         OOP.SuperCall(self, "SportsCar", "start", args)
         // Then do SportsCar-specific startup
         PrintMessage("Turbo engaged\n")
@@ -406,8 +407,8 @@ Function.SportsCar_Start {
 |----------|---------|
 | `OOP.ObjectClass(obj)` | Class name string of this object |
 | `OOP.ObjectIsInstance(obj, class_name)` | `1` if obj is an instance of class or any subclass |
-| `OOP.ClassGetFields(class_name)` | `XArray` of field name strings |
-| `OOP.ClassGetMethods(class_name)` | `XArray` of method name strings |
+| `OOP.ClassGetFields(class_name)` | `Array` of field name strings (`Hash.Keys`) |
+| `OOP.ClassGetMethods(class_name)` | `Array` of method name strings (`Hash.Keys`) |
 | `OOP.ClassGetParent(class_name)` | Parent class name or `0` |
 | `OOP.ClassExists(class_name)` | `1` if class is registered |
 
@@ -425,14 +426,14 @@ WhileLoop NotEqual(current, 0) {
 
 ## PERFORMANCE NOTES
 
-Every field access is a `HashMap` lookup. Every method call is a
-HashMap traversal up the inheritance chain plus a `CallIndirect`.
+Every field access is a `Hash` lookup. Every method call is a
+Hash traversal up the inheritance chain plus a `CallIndirect`.
 This is appropriate for high-level modeling code — it is not
 appropriate for hot paths, tight loops, or systems code.
 
 For performance-critical objects, use `LinkagePool` instead —
 field access is a single `[R15 + offset]` instruction with no
-HashMap overhead. `Library.OOP` is the right choice when the OOP
+Hash overhead. `Library.OOP` is the right choice when the OOP
 model matters more than raw speed.
 
 ---
@@ -454,8 +455,8 @@ model matters more than raw speed.
 
 ## SEE ALSO
 
-`Library.HashMap`,
-`Library.Option`,
+`Library.Hash` (`Hash.Create` / `Set` / `Get` / `Keys`),
+`Library.Array` (`Array.Create` / `Push` / `Size` / `Get`),
 `LinkagePool` (Memory Management Reference Manual),
 `AILang Language Introduction`
 
@@ -463,7 +464,7 @@ model matters more than raw speed.
 
 ## VERSION
 
-Opt-in OOP library. Implemented entirely on `HashMap` + `CallIndirect`
+Opt-in OOP library. Implemented entirely on `Hash` + `Array` + `CallIndirect`
 with no compiler support. Single inheritance, mixins, dynamic dispatch,
 super calls, and full introspection.
 
