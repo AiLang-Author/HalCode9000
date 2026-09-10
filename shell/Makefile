@@ -35,9 +35,17 @@ else
 	-lgobject-2.0 -lglib-2.0 -lm
 endif
 
-.PHONY: all clean run
+AILANG ?= $(shell command -v ailang.x)
 
-all: halcode_shell_gtk write_hello_frame
+.PHONY: all clean run desk
+
+all: halcode_shell_gtk write_hello_frame desk
+
+desk: halcode_desk.x
+
+halcode_desk.x: halcode_desk.ailang
+	@test -n "$(AILANG)" || (echo "ailang.x not on PATH"; exit 1)
+	cd "$(AILANG_ROOT)" && $(AILANG) "$(CURDIR)/halcode_desk.ailang" "$(CURDIR)/halcode_desk.x"
 
 halcode_shell_gtk: halcode_shell_gtk.c
 	cc -O2 -o $@ $< $(GTK_CFLAGS) $(GTK_LIBS)
@@ -46,9 +54,11 @@ write_hello_frame: write_hello_frame.c
 	cc -O2 -o $@ $<
 
 clean:
-	rm -f halcode_shell_gtk write_hello_frame
+	rm -f halcode_shell_gtk write_hello_frame halcode_desk.x
 
 run: all
 	mkdir -p /tmp/halcode_app
-	./write_hello_frame /tmp/halcode_app
+	./halcode_desk.x & echo $$! > /tmp/halcode_desk.pid
+	sleep 0.4
 	HALCODE_APP_STATE=/tmp/halcode_app ./halcode_shell_gtk /tmp/halcode_app
+	if [ -f /tmp/halcode_desk.pid ]; then kill $$(cat /tmp/halcode_desk.pid) 2>/dev/null || true; fi

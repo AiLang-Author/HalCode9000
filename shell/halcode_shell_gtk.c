@@ -25,6 +25,7 @@
 
 static char g_dir[512];
 static char path_meta[600], path_frame[600], path_gen[600];
+static char path_ptr[600], path_cmd[600];
 
 static GtkWidget *g_win;
 static GtkWidget *g_da;
@@ -37,6 +38,38 @@ static void paths_init(const char *dir) {
     snprintf(path_meta, sizeof path_meta, "%s/meta.bin", dir);
     snprintf(path_frame, sizeof path_frame, "%s/frame.raw", dir);
     snprintf(path_gen, sizeof path_gen, "%s/gen.txt", dir);
+    snprintf(path_ptr, sizeof path_ptr, "%s/ptr.txt", dir);
+    snprintf(path_cmd, sizeof path_cmd, "%s/cmd.txt", dir);
+}
+
+static void write_line(const char *path, const char *s) {
+    char tmp[640];
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    FILE *f = fopen(tmp, "w");
+    if (!f) return;
+    fputs(s, f);
+    fputc('\n', f);
+    fclose(f);
+    rename(tmp, path);
+}
+
+static void write_cmd(const char *s) { write_line(path_cmd, s); }
+
+static void write_ptr(const char *kind, double wx, double wy) {
+    GtkAllocation a;
+    int fx, fy;
+    char buf[64];
+    if (!g_da || g_fw < 16 || g_fh < 16) return;
+    gtk_widget_get_allocation(g_da, &a);
+    if (a.width < 1 || a.height < 1) return;
+    fx = (int)(wx * (double)g_fw / (double)a.width);
+    fy = (int)(wy * (double)g_fh / (double)a.height);
+    if (fx < 0) fx = 0;
+    if (fy < 0) fy = 0;
+    if (fx >= g_fw) fx = g_fw - 1;
+    if (fy >= g_fh) fy = g_fh - 1;
+    snprintf(buf, sizeof buf, "%s %d %d", kind, fx, fy);
+    write_line(path_ptr, buf);
 }
 
 static int read_gen(void) {
@@ -152,18 +185,38 @@ static gboolean poll_tick(gpointer data) {
 static void on_quit(GtkWidget *w, gpointer data) {
     (void)w;
     (void)data;
+    write_cmd("quit");
     gtk_main_quit();
+}
+
+static gboolean on_button(GtkWidget *w, GdkEventButton *e, gpointer data) {
+    (void)w;
+    (void)data;
+    if (e->type == GDK_BUTTON_PRESS)
+        write_ptr("d", e->x, e->y);
+    else if (e->type == GDK_BUTTON_RELEASE)
+        write_ptr("u", e->x, e->y);
+    return TRUE;
+}
+
+static gboolean on_motion(GtkWidget *w, GdkEventMotion *e, gpointer data) {
+    (void)w;
+    (void)data;
+    if (e->state & GDK_BUTTON1_MASK)
+        write_ptr("m", e->x, e->y);
+    return TRUE;
 }
 
 static gboolean on_key(GtkWidget *w, GdkEventKey *e, gpointer data) {
     (void)w;
     (void)data;
-    if ((e->state & GDK_CONTROL_MASK) &&
-        (e->keyval == GDK_KEY_q || e->keyval == GDK_KEY_Q)) {
+    if (e->keyval == GDK_KEY_q || e->keyval == GDK_KEY_Q ||
+        ((e->state & GDK_CONTROL_MASK) &&
+         (e->keyval == GDK_KEY_q || e->keyval == GDK_KEY_Q))) {
+        write_cmd("quit");
         gtk_main_quit();
         return TRUE;
     }
-    /* Later: JSON to @halcode/shell. IME stays in GTK. */
     return FALSE;
 }
 
@@ -196,8 +249,14 @@ int main(int argc, char **argv) {
     g_da = gtk_drawing_area_new();
     gtk_widget_set_hexpand(g_da, TRUE);
     gtk_widget_set_vexpand(g_da, TRUE);
-    gtk_widget_add_events(g_da, GDK_BUTTON_PRESS_MASK | GDK_POINTER_MOTION_MASK);
+    gtk_widget_set_size_request(g_da, 1100, 720);
+    gtk_widget_add_events(g_da,
+        GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK |
+        GDK_POINTER_MOTION_MASK | GDK_BUTTON1_MOTION_MASK);
     g_signal_connect(g_da, "draw", G_CALLBACK(on_draw), NULL);
+    g_signal_connect(g_da, "button-press-event", G_CALLBACK(on_button), NULL);
+    g_signal_connect(g_da, "button-release-event", G_CALLBACK(on_button), NULL);
+    g_signal_connect(g_da, "motion-notify-event", G_CALLBACK(on_motion), NULL);
     gtk_box_pack_start(GTK_BOX(root), g_da, TRUE, TRUE, 0);
 
     g_status = gtk_label_new("waiting for kernel");

@@ -1,19 +1,28 @@
-# HalCode GTK shell (phase 1)
+# HalCode GTK shell
 
-Thin native chrome. The kernel (`HalCode9000.x`) will own AppDesk MDI and
-write a CAD-style framebuffer. This process only blits.
+Two processes, same as CAD/Paint:
+
+- `halcode_desk.x` — AILang kernel. AppDesk MDI, fonts, framebuffer.
+- `halcode_shell_gtk` — native chrome + Cairo blit only.
+
+GTK first. Haiku can run the Linux GTK binary on the Linux runtime bridge;
+BeAPI chrome is later, not a HalCode port.
 
 ```
 make -C shell
 make -C shell run
 ```
 
-State dir (`HALCODE_APP_STATE`, default `/tmp/halcode_app`):
+Drag title bars, resize the grip, X closes a window, `q` quits.
+
+State dir `/tmp/halcode_app` (CAD contract):
 
 | File | Meaning |
 |---|---|
-| `meta.bin` | three `int32`: width, height, pitch |
-| `frame.raw` | BGRA, `pitch * height` |
-| `gen.txt` | integer; shell reloads when it changes |
+| `meta.bin` | int32 width, height, pitch |
+| `frame.raw` | BGRA |
+| `gen.txt` | generation; shell reloads on change |
+| `ptr.txt` | `d`/`m`/`u` x y (mouse) |
+| `cmd.txt` | `quit` |
 
-Input will be `@halcode/shell` JSON. Not `cmd.txt`.
+Socket JSON (`@halcode/shell`) replaces `ptr.txt` when chat IME lands.
