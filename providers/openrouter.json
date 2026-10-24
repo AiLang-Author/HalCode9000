@@ -10,6 +10,26 @@
   "tier": 1,
   "models": [
     {
+      "id": "inclusionai/ling-3.0-flash-vl:free",
+      "display": "inclusionAI: Ling 3.0 Flash VL (free)"
+    },
+    {
+      "id": "deepseek/deepseek-v4.1-flash",
+      "display": "DeepSeek: DeepSeek V4.1 Flash"
+    },
+    {
+      "id": "inception/mercury-2.5",
+      "display": "Inception: Mercury 2.5"
+    },
+    {
+      "id": "nex-agi/nex-n2.5-mini:free",
+      "display": "Nex AGI: Nex-N2.5-Mini (free)"
+    },
+    {
+      "id": "nex-agi/nex-n2.5-pro:free",
+      "display": "Nex AGI: Nex-N2.5-Pro (free)"
+    },
+    {
       "id": "openai/gpt-6-astra",
       "display": "OpenAI: GPT-6 Astra"
     },
@@ -58,10 +78,6 @@
       "display": "Anthropic: Claude Fable 5.1 (batch)"
     },
     {
-      "id": "inception/mercury-2.5-preview",
-      "display": "Inception: Mercury 2.5 Preview"
-    },
-    {
       "id": "ibm-granite/granite-4.2-8b",
       "display": "IBM: Granite 4.2 8B"
     },
@@ -102,6 +118,10 @@
       "display": "DeepSeek: DeepSeek V4 Flash Vision Exp"
     },
     {
+      "id": "deepseek/deepseek-v4-flash-vision-exp:batch",
+      "display": "DeepSeek: DeepSeek V4 Flash Vision Exp (batch)"
+    },
+    {
       "id": "tencent/hy-mt2-1.8b",
       "display": "Tencent: Hy-MT2-1.8B"
     },
@@ -120,6 +140,10 @@
     {
       "id": "z-ai/glm-5.3",
       "display": "Z.ai: GLM 5.3"
+    },
+    {
+      "id": "z-ai/glm-5.3:batch",
+      "display": "Z.ai: GLM 5.3 (batch)"
     },
     {
       "id": "qwen/qwen3.8-27b",
@@ -386,10 +410,6 @@
       "display": "Google: Nano Banana 2 Lite (Gemini 3.1 Flash Lite Image)"
     },
     {
-      "id": "nex-agi/nex-n2-mini",
-      "display": "Nex AGI: Nex-N2-Mini"
-    },
-    {
       "id": "sakana/fugu-ultra",
       "display": "Sakana: Fugu Ultra"
     },
@@ -410,6 +430,10 @@
       "display": "Z.ai: GLM 5.2"
     },
     {
+      "id": "z-ai/glm-5.2:batch",
+      "display": "Z.ai: GLM 5.2 (batch)"
+    },
+    {
       "id": "openrouter/fusion",
       "display": "OpenRouter: Fusion"
     },
@@ -428,10 +452,6 @@
     {
       "id": "anthropic/claude-fable-5:batch",
       "display": "Anthropic: Claude Fable 5 (batch)"
-    },
-    {
-      "id": "nex-agi/nex-n2-pro",
-      "display": "Nex AGI: Nex-N2-Pro"
     },
     {
       "id": "nvidia/nemotron-3.5-content-safety",
@@ -460,10 +480,6 @@
     {
       "id": "minimax/minimax-m3:batch",
       "display": "MiniMax: MiniMax M3 (batch)"
-    },
-    {
-      "id": "minimax/minimax-m3:free",
-      "display": "MiniMax: MiniMax M3 (free)"
     },
     {
       "id": "stepfun/step-3.7-flash",
@@ -702,10 +718,6 @@
       "display": "MiniMax: MiniMax M2.7"
     },
     {
-      "id": "minimax/minimax-m2.7:free",
-      "display": "MiniMax: MiniMax M2.7 (free)"
-    },
-    {
       "id": "openai/gpt-5.4-nano",
       "display": "OpenAI: GPT-5.4 Nano"
     },
@@ -724,6 +736,10 @@
     {
       "id": "mistralai/mistral-small-2603",
       "display": "Mistral: Mistral Small 4"
+    },
+    {
+      "id": "mistralai/mistral-small-2603:batch",
+      "display": "Mistral: Mistral Small 4 (batch)"
     },
     {
       "id": "z-ai/glm-5-turbo",
@@ -978,12 +994,20 @@
       "display": "Mistral: Ministral 3 8B 2512"
     },
     {
+      "id": "mistralai/ministral-8b-2512:batch",
+      "display": "Mistral: Ministral 3 8B 2512 (batch)"
+    },
+    {
       "id": "mistralai/ministral-3b-2512",
       "display": "Mistral: Ministral 3 3B 2512"
     },
     {
       "id": "mistralai/mistral-large-2512",
       "display": "Mistral: Mistral Large 3 2512"
+    },
+    {
+      "id": "mistralai/mistral-large-2512:batch",
+      "display": "Mistral: Mistral Large 3 2512 (batch)"
     },
     {
       "id": "deepseek/deepseek-v3.2",
@@ -1162,10 +1186,6 @@
       "display": "Qwen: Qwen3 30B A3B Thinking 2507"
     },
     {
-      "id": "nousresearch/hermes-4-70b",
-      "display": "Nous: Hermes 4 70B"
-    },
-    {
       "id": "nousresearch/hermes-4-405b",
       "display": "Nous: Hermes 4 405B"
     },
@@ -1176,6 +1196,10 @@
     {
       "id": "mistralai/mistral-medium-3.1",
       "display": "Mistral: Mistral Medium 3.1"
+    },
+    {
+      "id": "mistralai/mistral-medium-3.1:batch",
+      "display": "Mistral: Mistral Medium 3.1 (batch)"
     },
     {
       "id": "z-ai/glm-4.5v",
@@ -1232,6 +1256,10 @@
     {
       "id": "mistralai/codestral-2508",
       "display": "Mistral: Codestral 2508"
+    },
+    {
+      "id": "mistralai/codestral-2508:batch",
+      "display": "Mistral: Codestral 2508 (batch)"
     },
     {
       "id": "qwen/qwen3-coder-30b-a3b-instruct",

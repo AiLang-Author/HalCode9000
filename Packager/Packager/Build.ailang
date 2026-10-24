@@ -57,8 +57,8 @@ Function.Build_Run {
                         BuildState.fail_count = Add(BuildState.fail_count, 1)
                     }
 
-                    Deallocate(out_name, 0)
-                    Deallocate(out_path, 0)
+                    Deallocate(out_name, Add(StringLength(out_name), 1))
+                    Deallocate(out_path, Add(StringLength(out_path), 1))
                 }
             }
             i = Add(i, 1)
@@ -161,7 +161,7 @@ Function.Build_DeriveOutputName {
             MemoryCopy(base, name, base_len)
             SetByte(base, base_len, 0)
             result = StringConcat(base, ".x")
-            Deallocate(base, 0)
+            Deallocate(base, Add(base_len, 1))
             ReturnValue(result)
         }
 

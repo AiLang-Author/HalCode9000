@@ -100,7 +100,7 @@ Function.Parse_Imports {
             IfCondition EqualTo(first_ch, 82) ThenBlock: { ContinueLoop }
         }
 
-        Deallocate(content, 0)
+        Deallocate(content, Add(StringLength(content), 1))
         ReturnValue(imports)
     }
 }
@@ -190,7 +190,7 @@ Function.Parse_ResolveLibImport {
             // Simple: "Librarys/Library.X.ailang"
             tmp1 = StringConcat("Librarys/Library.", name)
             result = StringConcat(tmp1, ".ailang")
-            Deallocate(tmp1, 0)
+            Deallocate(tmp1, Add(StringLength(tmp1), 1))
             ReturnValue(result)
         }
 
@@ -222,21 +222,21 @@ Function.Parse_ResolveLibImport {
                 IfCondition EqualTo(seg_idx, dot_count) ThenBlock: {
                     // Last segment: add "/Library.seg.ailang"
                     tmp1 = StringConcat(result, "/Library.")
-                    Deallocate(result, 0)
+                    Deallocate(result, Add(StringLength(result), 1))
                     tmp2 = StringConcat(tmp1, seg)
-                    Deallocate(tmp1, 0)
+                    Deallocate(tmp1, Add(StringLength(tmp1), 1))
                     result = StringConcat(tmp2, ".ailang")
-                    Deallocate(tmp2, 0)
+                    Deallocate(tmp2, Add(StringLength(tmp2), 1))
                 } ElseBlock: {
                     // Intermediate: add "/seg"
                     tmp1 = StringConcat(result, "/")
-                    Deallocate(result, 0)
+                    Deallocate(result, Add(StringLength(result), 1))
                     tmp2 = StringConcat(tmp1, seg)
-                    Deallocate(tmp1, 0)
+                    Deallocate(tmp1, Add(StringLength(tmp1), 1))
                     result = tmp2
                 }
 
-                Deallocate(seg, 0)
+                Deallocate(seg, Add(seg_len, 1))
                 seg_start = Add(i, 1)
                 seg_idx = Add(seg_idx, 1)
             }
@@ -272,7 +272,7 @@ Function.Parse_ResolveImport {
         SetByte(buf, j, 0)
 
         result = StringConcat(buf, ".ailang")
-        Deallocate(buf, 0)
+        Deallocate(buf, Add(len, 8))
         ReturnValue(result)
     }
 }

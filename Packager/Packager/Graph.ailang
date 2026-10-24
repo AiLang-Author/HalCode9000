@@ -88,7 +88,7 @@ Function.Graph_DFSVisit {
                     // Back edge = cycle
                     tmp = StringConcat(node, " -> ")
                     GraphState.cycle_path = StringConcat(tmp, dep)
-                    Deallocate(tmp, 0)
+                    Deallocate(tmp, Add(StringLength(tmp), 1))
                     ReturnValue(1)
                 }
 

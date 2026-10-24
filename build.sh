@@ -192,4 +192,4 @@ build_app "$ROOT" \
 
 log ""
 log "build.sh: done"
-[[ $COPY -eq 1 && $BUILD_MAIN -eq 1 ]] && log "Run:  cd $ROOT && ./HalCode9000.x"
+[[ $COPY -eq 1 && $BUILD_MAIN -eq 1 ]] && log "Run:  cd $ROOT && ./HalCode9000.x" || true

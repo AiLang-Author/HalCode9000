@@ -1060,6 +1060,8 @@ Function.UI_ChatPutByte {
 Function.UI.ChatPrint {
     Input: s: Address
     Body: {
+        // --host has no TUI. Drawing here is the null write at TUI_BufferChar.
+        IfCondition EqualTo(UILayout.initialized, 0) ThenBlock: { ReturnValue(0) }
         IfCondition EqualTo(s, 0) ThenBlock: { ReturnValue(0) }
         n = StringLength(s)
         IfCondition LessEqual(n, 0) ThenBlock: { ReturnValue(0) }
@@ -1116,6 +1118,7 @@ Function.UI.ChatPrint {
 Function.UI.ChatPrintln {
     Input: s: Address
     Body: {
+        IfCondition EqualTo(UILayout.initialized, 0) ThenBlock: { ReturnValue(0) }
         UI.ChatPrint(s)
         // Flush any remaining accumulator
         IfCondition NotEqual(UILayout.line_acc, 0) ThenBlock: {
@@ -1136,6 +1139,7 @@ Function.UI.ChatPrintln {
 Function.UI.ChatPrintDim {
     Input: s: Address
     Body: {
+        IfCondition EqualTo(UILayout.initialized, 0) ThenBlock: { ReturnValue(0) }
         TUI_SetFG(UIColors.DIM_FG)
         UI.ChatPrint(s)
         TUI_ResetColor()
@@ -2235,6 +2239,7 @@ Function.UI.SetProjectThread {
     Input: proj: Address
     Input: thrd: Address
     Body: {
+        IfCondition EqualTo(UILayout.initialized, 0) ThenBlock: { ReturnValue(0) }
         pbuf = UILayout.proj_slug
         IfCondition And(NotEqual(pbuf, 0), NotEqual(proj, 0)) ThenBlock: {
             _pi = 0

@@ -20,14 +20,14 @@ Function.Manifest_Load {
         mpath = Pkg_PathJoin(dir, "package.json")
         content = Pkg_ReadFile(mpath)
         IfCondition EqualTo(content, 0) ThenBlock: {
-            Deallocate(mpath, 0)
+            Deallocate(mpath, Add(StringLength(mpath), 1))
             ReturnValue(0)
         }
 
         parsed = ParseJSON(content)
-        Deallocate(content, 0)
+        Deallocate(content, Add(StringLength(content), 1))
         IfCondition EqualTo(parsed, 0) ThenBlock: {
-            Deallocate(mpath, 0)
+            Deallocate(mpath, Add(StringLength(mpath), 1))
             ReturnValue(0)
         }
 
@@ -93,7 +93,7 @@ Function.Manifest_Create {
         IfCondition NotEqual(first_entry, 0) ThenBlock: {
             JSON.SetString(obj, "entry", first_entry)
         }
-        Deallocate(expected_entry, 0)
+        Deallocate(expected_entry, Add(StringLength(expected_entry), 1))
 
         // Build section
         build = JSON.NewObject()
@@ -146,7 +146,7 @@ Function.Manifest_Save {
         mpath = Pkg_PathJoin(dir, "package.json")
         content = JSON.SerializeObject(ManifestState.json)
         Pkg_WriteFile(mpath, content)
-        Deallocate(mpath, 0)
+        Deallocate(mpath, Add(StringLength(mpath), 1))
         ManifestState.dirty = 0
     }
 }

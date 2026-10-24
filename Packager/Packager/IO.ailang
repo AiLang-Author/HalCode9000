@@ -212,7 +212,7 @@ Function.Pkg_PathJoin {
         tmp = StringConcat(dir, sep)
         result = StringConcat(tmp, name)
         Deallocate(sep, 2)
-        Deallocate(tmp, 0)
+        Deallocate(tmp, Add(StringLength(tmp), 1))
         ReturnValue(result)
     }
 }

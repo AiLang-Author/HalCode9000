@@ -49,11 +49,11 @@ Function.Install_Generate {
 
         t1 = StringConcat("# Package: ", name)
         t2 = StringConcat(t1, " v")
-        Deallocate(t1, 0)
+        Deallocate(t1, Add(StringLength(t1), 1))
         t1 = StringConcat(t2, ver)
-        Deallocate(t2, 0)
+        Deallocate(t2, Add(StringLength(t2), 1))
         s = Install_Append(s, t1)
-        Deallocate(t1, 0)
+        Deallocate(t1, Add(StringLength(t1), 1))
         s = Install_Append(s, nl)
 
         s = Install_Append(s, "set -euo pipefail")
@@ -63,30 +63,30 @@ Function.Install_Generate {
         // INSTALL_DIR variable
         t1 = StringConcat("INSTALL_DIR=\"", install_dir)
         t2 = StringConcat(t1, "\"")
-        Deallocate(t1, 0)
+        Deallocate(t1, Add(StringLength(t1), 1))
         s = Install_Append(s, t2)
-        Deallocate(t2, 0)
+        Deallocate(t2, Add(StringLength(t2), 1))
         s = Install_Append(s, nl)
 
         // BIN_DIR variable
         t1 = StringConcat("BIN_DIR=\"", bin_dir)
         t2 = StringConcat(t1, "\"")
-        Deallocate(t1, 0)
+        Deallocate(t1, Add(StringLength(t1), 1))
         s = Install_Append(s, t2)
-        Deallocate(t2, 0)
+        Deallocate(t2, Add(StringLength(t2), 1))
         s = Install_Append(s, nl)
         s = Install_Append(s, nl)
 
         // Echo
         t1 = StringConcat("echo \"Installing ", name)
         t2 = StringConcat(t1, " v")
-        Deallocate(t1, 0)
+        Deallocate(t1, Add(StringLength(t1), 1))
         t1 = StringConcat(t2, ver)
-        Deallocate(t2, 0)
+        Deallocate(t2, Add(StringLength(t2), 1))
         t2 = StringConcat(t1, "...\"")
-        Deallocate(t1, 0)
+        Deallocate(t1, Add(StringLength(t1), 1))
         s = Install_Append(s, t2)
-        Deallocate(t2, 0)
+        Deallocate(t2, Add(StringLength(t2), 1))
         s = Install_Append(s, nl)
         s = Install_Append(s, nl)
 
@@ -137,16 +137,16 @@ Function.Install_Generate {
                     s = Install_Append(s, nl)
                     t1 = StringConcat("ln -sf \"$INSTALL_DIR/", bin_name)
                     t2 = StringConcat(t1, "\" \"$BIN_DIR/")
-                    Deallocate(t1, 0)
+                    Deallocate(t1, Add(StringLength(t1), 1))
                     t1 = StringConcat(t2, name)
-                    Deallocate(t2, 0)
+                    Deallocate(t2, Add(StringLength(t2), 1))
                     t2 = StringConcat(t1, "\"")
-                    Deallocate(t1, 0)
+                    Deallocate(t1, Add(StringLength(t1), 1))
                     s = Install_Append(s, t2)
-                    Deallocate(t2, 0)
+                    Deallocate(t2, Add(StringLength(t2), 1))
                     s = Install_Append(s, nl)
                     s = Install_Append(s, nl)
-                    Deallocate(bin_name, 0)
+                    Deallocate(bin_name, Add(StringLength(bin_name), 1))
                 }
             }
         }
@@ -157,9 +157,9 @@ Function.Install_Generate {
             s = Install_Append(s, nl)
             t1 = StringConcat("\"$INSTALL_DIR/", post_install)
             t2 = StringConcat(t1, "\"")
-            Deallocate(t1, 0)
+            Deallocate(t1, Add(StringLength(t1), 1))
             s = Install_Append(s, t2)
-            Deallocate(t2, 0)
+            Deallocate(t2, Add(StringLength(t2), 1))
             s = Install_Append(s, nl)
             s = Install_Append(s, nl)
         }
@@ -167,13 +167,13 @@ Function.Install_Generate {
         // Done message
         t1 = StringConcat("echo \"Installed ", name)
         t2 = StringConcat(t1, " v")
-        Deallocate(t1, 0)
+        Deallocate(t1, Add(StringLength(t1), 1))
         t1 = StringConcat(t2, ver)
-        Deallocate(t2, 0)
+        Deallocate(t2, Add(StringLength(t2), 1))
         t2 = StringConcat(t1, " to $INSTALL_DIR\"")
-        Deallocate(t1, 0)
+        Deallocate(t1, Add(StringLength(t1), 1))
         s = Install_Append(s, t2)
-        Deallocate(t2, 0)
+        Deallocate(t2, Add(StringLength(t2), 1))
         s = Install_Append(s, nl)
 
         Deallocate(nl, 2)
@@ -188,7 +188,7 @@ Function.Install_Append {
     Output: Address
     Body: {
         result = StringConcat(acc, addition)
-        Deallocate(acc, 0)
+        Deallocate(acc, Add(StringLength(acc), 1))
         ReturnValue(result)
     }
 }
@@ -205,6 +205,6 @@ Function.Install_Write {
 
         // Make executable: chmod 0755 (= 493)
         SystemCall(PkgSys.SYS_CHMOD, path, 493, 0, 0, 0)
-        Deallocate(path, 0)
+        Deallocate(path, Add(StringLength(path), 1))
     }
 }

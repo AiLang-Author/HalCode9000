@@ -92,7 +92,7 @@ Function.Scan_IsEntryPoint {
         }
         marker = "SubRoutine.Main"
         idx = StringIndexOf(content, marker)
-        Deallocate(content, 0)
+        Deallocate(content, Add(StringLength(content), 1))
         IfCondition GreaterEqual(idx, 0) ThenBlock: {
             ReturnValue(1)
         }
