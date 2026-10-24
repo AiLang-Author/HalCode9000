@@ -20,7 +20,7 @@ Full-screen terminal agent with persistent memory, parallel tool workers, sub-ag
 
 - **Skills System** — Give the agent persistent, composable skills: tool-use patterns, coding standards, architecture rules, domain knowledge, debugging strategies, and more. The model can read, combine, and improve them over time.
 - **23 persistent tool workers** over abstract Unix sockets — fast, reliable, and easy to extend.
-- **True long-term memory** via PostgreSQL (`pgmem`) + code-aware repository indexing (`relmem`).
+- **External memory plugins** ship as binaries. They are not documented in this repo.
 - **Sub-agents** — spawn parallel agents with their own tools and context.
 - **Multi-provider** — Anthropic, OpenAI, Grok, Gemini, DeepSeek, Groq, Ollama, and any OpenAI-compatible backend.
 - **MCP server mode** — drop-in backend for Claude Code and other MCP clients.
@@ -36,7 +36,7 @@ cd HalCode9000
 ./setup.sh
 ```
 
-The setup wizard handles PostgreSQL, OlympusRepo, and API key configuration.
+The setup wizard handles API keys and optional local services.
 
 Then launch:
 
@@ -53,8 +53,8 @@ source ~/.halcode/keys.env
 |---|---|
 | **Skills** | Persistent, version-controlled `.skill` files that teach the agent reusable behaviors and knowledge |
 | **Multi-Provider** | Switch between providers at startup. Add new ones with a single JSON file |
-| **Persistent Memory** | `pgmem` stores sessions, decisions, todos, and context across restarts |
-| **Code-Aware Memory** | `relmem` lets the model search symbols and definitions across your entire codebase |
+| **Persistent Memory** | External plugin. Not documented in this repo. |
+| **Code-Aware Memory** | External plugin. Not documented in this repo. |
 | **Parallel Tools** | 23 standalone workers (Read, Edit, Bash, Git, Grep, WebFetch, etc.) dispatched in parallel |
 | **Sub-Agents** | Model can spawn child agents for complex tasks |
 | **MCP Mode** | Run as `--mcp` for seamless integration with Claude Code |
@@ -106,7 +106,7 @@ Adding a new tool is as simple as writing one binary and registering it.
 
 ## MCP Server Mode
 
-HalCode9000 ships a dedicated MCP bridge binary (`cc_mcp_ipc.x`) that speaks the Model Context Protocol over stdio. Register it once and any MCP client — Claude Code, Cursor, Windsurf — gets access to DeepSeek, sandboxed Bash, and the Relmem symbol graph.
+HalCode9000 ships a dedicated MCP bridge binary (`cc_mcp_ipc.x`) that speaks the Model Context Protocol over stdio. Register it once and any MCP client — Claude Code, Cursor, Windsurf — gets access to DeepSeek and sandboxed Bash.
 
 ```bash
 claude mcp add -s user halcode9000 -- /path/to/cc_mcp_ipc.x
@@ -135,10 +135,10 @@ HalCode9000 is a native terminal chat client that drives LLM agents backed by a 
 Supports Anthropic, OpenAI, DeepSeek, Gemini, Grok/xAI, OpenRouter, and local Ollama. Drop in a JSON config file to add your own provider.
 
 **Highlights:**
-- **MCP bridge** — `cc_mcp_ipc.x` speaks the Model Context Protocol over stdio. Register once with `claude mcp add` and any MCP client (Claude Code, Cursor, Windsurf) can call DeepSeek, sandboxed Bash, and the Relmem symbol graph directly.
+- **MCP bridge** — `cc_mcp_ipc.x` speaks the Model Context Protocol over stdio. Register once with `claude mcp add` and any MCP client (Claude Code, Cursor, Windsurf) can call DeepSeek and sandboxed Bash directly.
 - **Poll-based IPC multiplexing** — tool workers serve HalCode9000 and external MCP clients concurrently with zero blocking and no connection queuing.
 - **Skills system** — 24 version-controlled skill sheets in `/skills/` teach the agent reusable patterns, project conventions, and domain knowledge that persist across sessions.
-- **Persistent context via Pgmem** — agents pick up working state right where the last session left off.
+- **External memory plugins** — not documented in this repo.
 - **Full input editing** — cursor movement, insert-at-position, backspace-at-position, home/end, plus scroll buffer.
 
 **Also shipping:**
