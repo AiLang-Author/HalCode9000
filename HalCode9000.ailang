@@ -2314,12 +2314,39 @@ Function.CC_GenerateSessionGUID {
     }
 }
 
+// Letters, digits, hyphen, underscore, length 1..80. "new" and "last" pass.
+// A reused debug line (spaces, brackets, colons) does not.
+Function.CC_SessionIdSafe {
+    Input: sid: Address
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(sid, 0) ThenBlock: { ReturnValue(0) }
+        n = StringLength(sid)
+        IfCondition Or(LessThan(n, 1), GreaterThan(n, 80)) ThenBlock: { ReturnValue(0) }
+        i = 0
+        WhileLoop LessThan(i, n) {
+            c = GetByte(sid, i)
+            okc = 0
+            IfCondition And(GreaterEqual(c, 48), LessEqual(c, 57)) ThenBlock: { okc = 1 }
+            IfCondition And(GreaterEqual(c, 65), LessEqual(c, 90)) ThenBlock: { okc = 1 }
+            IfCondition And(GreaterEqual(c, 97), LessEqual(c, 122)) ThenBlock: { okc = 1 }
+            IfCondition EqualTo(c, 45) ThenBlock: { okc = 1 }
+            IfCondition EqualTo(c, 95) ThenBlock: { okc = 1 }
+            IfCondition EqualTo(okc, 0) ThenBlock: { ReturnValue(0) }
+            i = Add(i, 1)
+        }
+        ReturnValue(1)
+    }
+}
+
 Function.CC_SaveSessionToPgmem {
     Output: Integer
     Body: {
         sid = History.GetSessionID()
         IfCondition EqualTo(sid, 0) ThenBlock: { ReturnValue(0) }
         IfCondition EqualTo(StringLength(sid), 0) ThenBlock: { ReturnValue(0) }
+        sid_ok = CC_SessionIdSafe(sid)
+        IfCondition EqualTo(sid_ok, 0) ThenBlock: { ReturnValue(0) }
 
         title = History.GetTitle()
         IfCondition EqualTo(title, 0) ThenBlock: { title = "Untitled Session" }
@@ -2394,6 +2421,8 @@ Function.CC_LoadSessionFromPgmem {
     Body: {
         IfCondition EqualTo(sid, 0) ThenBlock: { ReturnValue(0) }
         IfCondition EqualTo(StringLength(sid), 0) ThenBlock: { ReturnValue(0) }
+        sid_ok = CC_SessionIdSafe(sid)
+        IfCondition EqualTo(sid_ok, 0) ThenBlock: { ReturnValue(0) }
 
         // Fetch history
         h_key = StringConcat("session:", sid)
@@ -2595,6 +2624,8 @@ Function.CC_CompactSession {
     Body: {
         sid = History.GetSessionID()
         IfCondition EqualTo(sid, 0) ThenBlock: { ReturnValue(0) }
+        sid_ok = CC_SessionIdSafe(sid)
+        IfCondition EqualTo(sid_ok, 0) ThenBlock: { ReturnValue(0) }
 
         ts = SystemCall(CCSys.SYS_TIME, 0, 0, 0, 0, 0)
         ts_str = NumberToString(ts)
@@ -3285,11 +3316,16 @@ Function.CC_ChatLoop {
                     SetByte(pfx8, 8, 0)
                     IfCondition EqualTo(StringCompare(pfx8, "/resume "), 0) ThenBlock: {
                         target_sid = Add(line, 8)
-                        ok = CC_LoadSessionFromPgmem(target_sid)
-                        IfCondition EqualTo(ok, 1) ThenBlock: {
-                            UI.ChatTag("✓", StringConcat("Loaded session: ", target_sid), 2)
+                        sid_ok = CC_SessionIdSafe(target_sid)
+                        IfCondition EqualTo(sid_ok, 0) ThenBlock: {
+                            UI.ChatTag("✗", "Session id is not valid.", 1)
                         } ElseBlock: {
-                            UI.ChatTag("✗", StringConcat("Session not found in Pgmem: ", target_sid), 1)
+                            ok = CC_LoadSessionFromPgmem(target_sid)
+                            IfCondition EqualTo(ok, 1) ThenBlock: {
+                                UI.ChatTag("✓", StringConcat("Loaded session: ", target_sid), 2)
+                            } ElseBlock: {
+                                UI.ChatTag("✗", StringConcat("Session not found in Pgmem: ", target_sid), 1)
+                            }
                         }
                     }
                     Deallocate(pfx8, 9)
@@ -4192,6 +4228,10 @@ Function.CC_GuiApplySession {
             ReturnValue(0)
         }
         IfCondition GreaterThan(n, 0) ThenBlock: {
+            buf_ok = CC_SessionIdSafe(buf)
+            IfCondition EqualTo(buf_ok, 0) ThenBlock: { n = 0 }
+        }
+        IfCondition GreaterThan(n, 0) ThenBlock: {
             ok = CC_LoadSessionFromPgmem(buf)
             IfCondition EqualTo(ok, 1) ThenBlock: {
                 IfCondition EqualTo(CC_SessionIsFresh(buf), 1) ThenBlock: {
@@ -4213,7 +4253,11 @@ Function.CC_GuiApplySession {
             ReturnValue(0)
         }
         sid = History.GetSessionID()
+        sid_ok = 0
         IfCondition NotEqual(sid, 0) ThenBlock: {
+            sid_ok = CC_SessionIdSafe(sid)
+        }
+        IfCondition EqualTo(sid_ok, 1) ThenBlock: {
             CC_WriteAppFile("/tmp/halcode_app/session.txt", sid)
             IfCondition EqualTo(CC_SessionIsFresh(sid), 1) ThenBlock: {
                 CCRunState.fresh = 1
@@ -4421,7 +4465,11 @@ Function.CC_RunAgentMode {
         CC_WriteStdout("\n")
         CC_SaveSessionToPgmem()
         sid_out = History.GetSessionID()
+        sid_ok = 0
         IfCondition NotEqual(sid_out, 0) ThenBlock: {
+            sid_ok = CC_SessionIdSafe(sid_out)
+        }
+        IfCondition EqualTo(sid_ok, 1) ThenBlock: {
             CC_WriteAppFile("/tmp/halcode_app/session.txt", sid_out)
         }
         CC_AgentLog("[worker] done")
