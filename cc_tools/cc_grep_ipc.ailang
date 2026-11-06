@@ -14,10 +14,10 @@
 
 LibraryImport.Arena
 LibraryImport.Regex_Thompson
-LibraryImport.Socket
 LibraryImport.JSON
 LibraryImport.StringUtils
 LibraryImport.UtilArgs
+Import.Platform.IPC
 
 FixedPool.CCGrepSys {
     "SYS_READ":       Initialize=0
@@ -1045,7 +1045,7 @@ Function.CCGrep_SendError {
         IfCondition NotEqual(id, 0) ThenBlock: { JSON.SetString(resp, "id", id) }
         JSON.SetBool(resp, "ok", 0)
         JSON.SetString(resp, "error", msg)
-        Socket.SendMsg(client_fd, JSON.SerializeObject(resp))
+        PlatformIPC_SendMsg(client_fd, JSON.SerializeObject(resp))
     }
 }
 
@@ -1061,7 +1061,7 @@ Function.CCGrep_SendResult {
         JSON.SetBool(resp, "ok", 1)
         JSON.SetString(resp, "content", content)
         IfCondition EqualTo(truncated, 1) ThenBlock: { JSON.SetBool(resp, "truncated", 1) }
-        Socket.SendMsg(client_fd, JSON.SerializeObject(resp))
+        PlatformIPC_SendMsg(client_fd, JSON.SerializeObject(resp))
     }
 }
 
@@ -1074,7 +1074,7 @@ Function.CCGrep_SendSchema {
         resp = JSON.NewObject()
         JSON.SetString(resp, "method", "schema_response")
         IfCondition NotEqual(schema_obj, 0) ThenBlock: { JSON.SetObject(resp, "schema", schema_obj) }
-        Socket.SendMsg(client_fd, JSON.SerializeObject(resp))
+        PlatformIPC_SendMsg(client_fd, JSON.SerializeObject(resp))
     }
 }
 
@@ -1260,26 +1260,21 @@ SubRoutine.Main {
     SystemCall(CCGrepSys.SYS_MKDIR, "/tmp/ailang_cctools", 493, 0, 0, 0)
     SystemCall(CCGrepSys.SYS_UNLINK, CCGrepConst.SOCK_PATH, 0, 0, 0, 0)
 
-    fd = Socket.Create(1, 1)
+    fd = PlatformIPC_Listen(CCGrepConst.SOCK_PATH, CCGrepConst.BACKLOG)
     IfCondition LessThan(fd, 0) ThenBlock: {
-        PrintMessage("[cc_grep_ipc] socket create failed\n")
+        PrintMessage("[cc_grep_ipc] listen failed
+")
         Exit(1)
     }
-    br = Socket.BindUnix(fd, CCGrepConst.SOCK_PATH)
-    IfCondition LessThan(br, 0) ThenBlock: {
-        PrintMessage("[cc_grep_ipc] bind failed\n")
-        Socket.Close(fd)  Exit(1)
-    }
-    Socket.Listen(fd, CCGrepConst.BACKLOG)
     CCGrepState.listen_fd = fd
     PrintMessage("[cc_grep_ipc] listening on @halcode/Grep\n")
 
     WhileLoop EqualTo(CCGrepState.running, 1) {
-        client_fd = Socket.Accept(CCGrepState.listen_fd)
+        client_fd = PlatformIPC_Accept(CCGrepState.listen_fd)
         IfCondition GreaterEqual(client_fd, 0) ThenBlock: {
             done = 0
             WhileLoop EqualTo(done, 0) {
-                req = Socket.RecvMsg(client_fd)
+                req = PlatformIPC_RecvMsg(client_fd)
                 IfCondition EqualTo(req, 0) ThenBlock: { done = 1 }
                 IfCondition NotEqual(req, 0) ThenBlock: {
                     IfCondition NotEqual(req, -1) ThenBlock: {
@@ -1287,10 +1282,12 @@ SubRoutine.Main {
                     }
                 }
             }
-            Socket.Close(client_fd)
+            IfCondition NotEqual(client_fd, CCGrepState.listen_fd) ThenBlock: {
+                PlatformIPC_Close(client_fd)
+            }
         }
     }
-    Socket.Close(CCGrepState.listen_fd)
+    PlatformIPC_Close(CCGrepState.listen_fd)
     Exit(0)
 }
 

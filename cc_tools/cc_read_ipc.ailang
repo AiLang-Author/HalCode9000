@@ -24,10 +24,10 @@
 // Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.
 
 LibraryImport.Arena
-LibraryImport.Socket
 LibraryImport.JSON
 LibraryImport.StringUtils
 LibraryImport.UtilArgs
+Import.Platform.IPC
 
 FixedPool.CCReadSys {
     "SYS_READ":      Initialize=0
@@ -52,6 +52,8 @@ FixedPool.CCReadState {
     "listen_fd":     Initialize=-1, CanChange=True
     "running":       Initialize=1, CanChange=True
     "content_cap":   Initialize=0, CanChange=True
+    "file_size":     Initialize=0, CanChange=True
+    "read_n":        Initialize=0, CanChange=True
 }
 
 // =============================================================================
@@ -165,6 +167,35 @@ Function.CCRead_DoRead {
             ReturnValue(0)
         }
 
+        st = Allocate(144)
+        fs = SystemCall(CCReadSys.SYS_FSTAT, fd, st, 0, 0, 0)
+        mode = 0
+        CCReadState.file_size = 0
+        IfCondition GreaterEqual(fs, 0) ThenBlock: {
+            mode = Add(GetByte(st, 24), Multiply(GetByte(st, 25), 256))
+            CCReadState.file_size = GetByte(st, 48)
+            CCReadState.file_size = Add(CCReadState.file_size, Multiply(GetByte(st, 49), 256))
+            CCReadState.file_size = Add(CCReadState.file_size, Multiply(GetByte(st, 50), 65536))
+            CCReadState.file_size = Add(CCReadState.file_size, Multiply(GetByte(st, 51), 16777216))
+        }
+        Deallocate(st, 144)
+        IfCondition EqualTo(BitwiseAnd(mode, 61440), 16384) ThenBlock: {
+            SystemCall(CCReadSys.SYS_CLOSE, fd, 0, 0, 0, 0)
+            prefix = "is a directory: "
+            i = 0
+            WhileLoop LessThan(i, StringLength(prefix)) {
+                SetByte(err_buf, i, GetByte(prefix, i))
+                i = Add(i, 1)
+            }
+            j = 0
+            WhileLoop LessThan(j, StringLength(path)) {
+                SetByte(err_buf, Add(i, j), GetByte(path, j))
+                j = Add(j, 1)
+            }
+            SetByte(err_buf, Add(i, j), 0)
+            ReturnValue(0)
+        }
+
         IfCondition GreaterThan(offset, 0) ThenBlock: {
             SystemCall(CCReadSys.SYS_LSEEK, fd, offset, 0, 0, 0)
         }
@@ -184,6 +215,7 @@ Function.CCRead_DoRead {
             total = Add(total, n)
         }
         SetByte(buf, total, 0)
+        CCReadState.read_n = total
 
         // Try one more byte to see if there's more — if so, mark truncated.
         IfCondition EqualTo(limit, 0) ThenBlock: {
@@ -249,7 +281,7 @@ Function.CCRead_SendError {
         JSON.SetBool(resp, "ok", 0)
         JSON.SetString(resp, "error", error_msg)
         out = JSON.SerializeObject(resp)
-        Socket.SendMsg(client_fd, out)
+        PlatformIPC_SendMsg(client_fd, out)
         Deallocate(out, Add(StringLength(out), 1))
         CCRead_FreeShallow(resp)
     }
@@ -268,7 +300,7 @@ Function.CCRead_SendResult {
         IfCondition NotEqual(content, 0) ThenBlock: { JSON.SetString(resp, "content", content) }
         IfCondition EqualTo(truncated, 1) ThenBlock: { JSON.SetBool(resp, "truncated", 1) }
         out = JSON.SerializeObject(resp)
-        Socket.SendMsg(client_fd, out)
+        PlatformIPC_SendMsg(client_fd, out)
         Deallocate(out, Add(StringLength(out), 1))
         CCRead_FreeShallow(resp)
     }
@@ -289,7 +321,7 @@ Function.CCRead_SendSchema {
             JSON.SetObject(resp, "schema", schema_obj)
         }
         out = JSON.SerializeObject(resp)
-        Socket.SendMsg(client_fd, out)
+        PlatformIPC_SendMsg(client_fd, out)
         Deallocate(out, Add(StringLength(out), 1))
         CCRead_FreeShallow(resp)
         // schema_obj belongs to parsed; free the tree once, after resp.
@@ -350,7 +382,10 @@ Function.CCRead_HandleRequest {
             } ElseBlock: {
                 // If truncated, append a marker line to content
                 IfCondition EqualTo(truncated, 1) ThenBlock: {
-                    marker = "\n[truncated: more bytes available]"
+                    marker = StringConcat("\n[truncated at ", NumberToString(CCReadState.read_n))
+                    marker = StringConcat(marker, " of ")
+                    marker = StringConcat(marker, NumberToString(CCReadState.file_size))
+                    marker = StringConcat(marker, " bytes]")
                     final = StringConcat(content, marker)
                     CCRead_SendResult(client_fd, id, final, 1)
                     Deallocate(final, Add(StringLength(final), 1))
@@ -385,21 +420,9 @@ SubRoutine.Main {
     // unlink stale socket
     SystemCall(CCReadSys.SYS_UNLINK, CCReadConst.SOCK_PATH, 0, 0, 0, 0)
 
-    fd = Socket.Create(1, 1)
+    fd = PlatformIPC_Listen(CCReadConst.SOCK_PATH, CCReadConst.BACKLOG)
     IfCondition LessThan(fd, 0) ThenBlock: {
-        PrintMessage("[cc_read_ipc] socket create failed\n")
-        Exit(1)
-    }
-    br = Socket.BindUnix(fd, CCReadConst.SOCK_PATH)
-    IfCondition LessThan(br, 0) ThenBlock: {
-        PrintMessage("[cc_read_ipc] bind failed\n")
-        Socket.Close(fd)
-        Exit(1)
-    }
-    lr = Socket.Listen(fd, CCReadConst.BACKLOG)
-    IfCondition LessThan(lr, 0) ThenBlock: {
         PrintMessage("[cc_read_ipc] listen failed\n")
-        Socket.Close(fd)
         Exit(1)
     }
     CCReadState.listen_fd = fd
@@ -409,14 +432,14 @@ SubRoutine.Main {
     PrintMessage("\n")
 
     WhileLoop EqualTo(CCReadState.running, 1) {
-        client_fd = Socket.Accept(CCReadState.listen_fd)
+        client_fd = PlatformIPC_Accept(CCReadState.listen_fd)
         IfCondition LessThan(client_fd, 0) ThenBlock: {
             // accept failed; loop and try again
         } ElseBlock: {
             // Per-connection request loop: keep handling messages until disconnect
             done = 0
             WhileLoop EqualTo(done, 0) {
-                req = Socket.RecvMsg(client_fd)
+                req = PlatformIPC_RecvMsg(client_fd)
                 IfCondition EqualTo(req, 0) ThenBlock: { done = 1 }
                 IfCondition EqualTo(req, -1) ThenBlock: {
                     // bad message, continue with this client
@@ -428,11 +451,13 @@ SubRoutine.Main {
                     }
                 }
             }
-            Socket.Close(client_fd)
+            IfCondition NotEqual(client_fd, CCReadState.listen_fd) ThenBlock: {
+                PlatformIPC_Close(client_fd)
+            }
         }
     }
 
-    Socket.Close(CCReadState.listen_fd)
+    PlatformIPC_Close(CCReadState.listen_fd)
     Exit(0)
 }
 

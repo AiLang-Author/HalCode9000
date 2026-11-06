@@ -8,13 +8,14 @@
 // Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.
 
 LibraryImport.Arena
-LibraryImport.Socket
 LibraryImport.JSON
 LibraryImport.StringUtils
 LibraryImport.UtilArgs
+Import.Platform.IPC
 
 FixedPool.CCSleepSys {
     "SYS_NANOSLEEP": Initialize=35
+    "SYS_POLL":      Initialize=7
 }
 
 FixedPool.CCSleepConst {
@@ -67,7 +68,7 @@ Function.CCSleep_SendError {
         IfCondition NotEqual(id, 0) ThenBlock: { JSON.SetString(resp, "id", id) }
         JSON.SetBool(resp, "ok", 0)
         JSON.SetString(resp, "error", msg)
-        Socket.SendMsg(client_fd, JSON.SerializeObject(resp))
+        PlatformIPC_SendMsg(client_fd, JSON.SerializeObject(resp))
     }
 }
 
@@ -81,7 +82,7 @@ Function.CCSleep_SendResult {
         IfCondition NotEqual(id, 0) ThenBlock: { JSON.SetString(resp, "id", id) }
         JSON.SetBool(resp, "ok", 1)
         JSON.SetString(resp, "content", content)
-        Socket.SendMsg(client_fd, JSON.SerializeObject(resp))
+        PlatformIPC_SendMsg(client_fd, JSON.SerializeObject(resp))
     }
 }
 
@@ -94,7 +95,7 @@ Function.CCSleep_SendSchema {
         resp = JSON.NewObject()
         JSON.SetString(resp, "method", "schema_response")
         IfCondition NotEqual(schema_obj, 0) ThenBlock: { JSON.SetObject(resp, "schema", schema_obj) }
-        Socket.SendMsg(client_fd, JSON.SerializeObject(resp))
+        PlatformIPC_SendMsg(client_fd, JSON.SerializeObject(resp))
     }
 }
 
@@ -154,34 +155,71 @@ Function.CCSleep_HandleRequest {
 SubRoutine.Main {
     CCSleepState.schema = CCSleep_BuildSchema()
 
-    fd = Socket.Create(1, 1)
+    fd = PlatformIPC_Listen(CCSleepConst.SOCK_PATH, CCSleepConst.BACKLOG)
     IfCondition LessThan(fd, 0) ThenBlock: {
-        PrintMessage("[cc_sleep_ipc] socket create failed\n")
-        SystemCall(60, 1, 0, 0, 0, 0)
+        PrintMessage("[cc_sleep_ipc] listen failed\n")
+        Exit(1)
     }
-
-    ok = Socket.BindUnix(fd, CCSleepConst.SOCK_PATH)
-    IfCondition LessThan(ok, 0) ThenBlock: {
         PrintMessage("[cc_sleep_ipc] bind failed — another instance running?\n")
         SystemCall(60, 1, 0, 0, 0, 0)
     }
 
-    Socket.Listen(fd, CCSleepConst.BACKLOG)
     CCSleepState.listen_fd = fd
     PrintMessage("[cc_sleep_ipc] listening on @halcode/Sleep\n")
 
+    // One persistent client (the host). Closing after the schema exchange
+    // left the host holding a dead fd, so the next Sleep call read EOF and
+    // reported "tool crashed or connection lost". Extra accepts are one-shot.
     WhileLoop EqualTo(CCSleepState.running, 1) {
-        client_fd = Socket.Accept(CCSleepState.listen_fd)
+        client_fd = PlatformIPC_Accept(CCSleepState.listen_fd)
         IfCondition GreaterEqual(client_fd, 0) ThenBlock: {
-            req = Socket.RecvMsg(client_fd)
-            IfCondition NotEqual(req, 0) ThenBlock: {
-                CCSleep_HandleRequest(client_fd, req)
+            done = 0
+            pfd = Allocate(16)
+            WhileLoop EqualTo(done, 0) {
+                StoreValue(pfd, client_fd, "dword")
+                SetByte(pfd, 4, 1)
+                SetByte(pfd, 5, 0)
+                SetByte(pfd, 6, 0)
+                SetByte(pfd, 7, 0)
+                StoreValue(Add(pfd, 8), CCSleepState.listen_fd, "dword")
+                SetByte(pfd, 12, 1)
+                SetByte(pfd, 13, 0)
+                SetByte(pfd, 14, 0)
+                SetByte(pfd, 15, 0)
+                SystemCall(CCSleepSys.SYS_POLL, pfd, 2, -1, 0, 0)
+                rev_listen = GetByte(pfd, 14)
+                rev_client = GetByte(pfd, 6)
+                IfCondition NotEqual(rev_listen, 0) ThenBlock: {
+                    new_fd = PlatformIPC_Accept(CCSleepState.listen_fd)
+                    IfCondition GreaterEqual(new_fd, 0) ThenBlock: {
+                        PlatformIPC_SetRecvTimeout(new_fd, 10000)
+                        mcp_req = PlatformIPC_RecvMsg(new_fd)
+                        IfCondition NotEqual(mcp_req, 0) ThenBlock: {
+                            IfCondition NotEqual(mcp_req, -1) ThenBlock: {
+                                CCSleep_HandleRequest(new_fd, mcp_req)
+                            }
+                        }
+                        PlatformIPC_Close(new_fd)
+                    }
+                }
+                IfCondition NotEqual(rev_client, 0) ThenBlock: {
+                    req = PlatformIPC_RecvMsg(client_fd)
+                    IfCondition EqualTo(req, 0) ThenBlock: { done = 1 }
+                    IfCondition NotEqual(req, 0) ThenBlock: {
+                        IfCondition NotEqual(req, -1) ThenBlock: {
+                            CCSleep_HandleRequest(client_fd, req)
+                        }
+                    }
+                }
             }
-            Socket.Close(client_fd)
+            Deallocate(pfd, 16)
+            IfCondition NotEqual(client_fd, CCSleepState.listen_fd) ThenBlock: {
+                PlatformIPC_Close(client_fd)
+            }
         }
     }
 
-    Socket.Close(CCSleepState.listen_fd)
+    PlatformIPC_Close(CCSleepState.listen_fd)
 }
 
 RunTask(Main)

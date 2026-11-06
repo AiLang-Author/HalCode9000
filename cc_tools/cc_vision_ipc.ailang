@@ -11,11 +11,11 @@
 // Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.
 
 LibraryImport.Arena
-LibraryImport.Socket
 LibraryImport.JSON
 LibraryImport.StringUtils
 LibraryImport.UtilArgs
 LibraryImport.HTTP
+Import.Platform.IPC
 
 FixedPool.CCVisSys {
     "SYS_READ":      Initialize=0
@@ -554,22 +554,22 @@ SubRoutine.Main {
     SystemCall(CCVisSys.SYS_MKDIR, CCVisConst.SOCK_DIR, 493, 0, 0, 0)
     SystemCall(CCVisSys.SYS_UNLINK, CCVisConst.SOCK_PATH, 0, 0, 0, 0)
 
-    listen_fd = Socket.Create(1, 1) // AF_UNIX=1, SOCK_STREAM=1
+    listen_fd = PlatformIPC_Listen(CCVisConst.SOCK_PATH, CCVisConst.BACKLOG)
     IfCondition LessThan(listen_fd, 0) ThenBlock: { SystemCall(1, 1, "Failed socket\n", 14, 0, 0) SystemCall(60, 1, 0, 0, 0, 0) }
 
-    res = Socket.BindUnix(listen_fd, CCVisConst.SOCK_PATH)
     IfCondition LessThan(res, 0) ThenBlock: { SystemCall(1, 1, "Failed bind\n", 12, 0, 0) SystemCall(60, 1, 0, 0, 0, 0) }
 
-    Socket.Listen(listen_fd, CCVisConst.BACKLOG)
     CCVisState.listen_fd = listen_fd
 
     WhileLoop EqualTo(CCVisState.running, 1) {
-        client_fd = Socket.Accept(listen_fd)
+        client_fd = PlatformIPC_Accept(listen_fd)
         IfCondition LessThan(client_fd, 0) ThenBlock: { ContinueLoop }
 
-        req_str = Socket.RecvMsg(client_fd)
+        req_str = PlatformIPC_RecvMsg(client_fd)
         IfCondition Or(EqualTo(req_str, 0), EqualTo(StringLength(req_str), 0)) ThenBlock: {
-            Socket.Close(client_fd)
+            IfCondition NotEqual(client_fd, CCVisState.listen_fd) ThenBlock: {
+                PlatformIPC_Close(client_fd)
+            }
             ContinueLoop
         }
 
@@ -579,8 +579,8 @@ SubRoutine.Main {
             JSON.SetString(err_resp, "method", "result")
             JSON.SetBool(err_resp, "ok", 0)
             JSON.SetString(err_resp, "error", "invalid JSON request")
-            Socket.SendMsg(client_fd, JSON.SerializeObject(err_resp))
-            Socket.Close(client_fd)
+            PlatformIPC_SendMsg(client_fd, JSON.SerializeObject(err_resp))
+            PlatformIPC_Close(client_fd)
             ContinueLoop
         }
 
@@ -598,9 +598,9 @@ SubRoutine.Main {
             IfCondition NotEqual(schema_obj, 0) ThenBlock: {
                 JSON.SetObject(sresp, "schema", schema_obj)
             }
-            Socket.SendMsg(client_fd, JSON.SerializeObject(sresp))
+            PlatformIPC_SendMsg(client_fd, JSON.SerializeObject(sresp))
             JSON.Free(parsed_schema)
-            Socket.Close(client_fd)
+            PlatformIPC_Close(client_fd)
             ContinueLoop
         }
 
@@ -624,12 +624,12 @@ SubRoutine.Main {
                 JSON.SetString(resp, "error", "Failed to process image path or URL")
             }
 
-            Socket.SendMsg(client_fd, JSON.SerializeObject(resp))
-            Socket.Close(client_fd)
+            PlatformIPC_SendMsg(client_fd, JSON.SerializeObject(resp))
+            PlatformIPC_Close(client_fd)
             ContinueLoop
         }
 
-        Socket.Close(client_fd)
+        PlatformIPC_Close(client_fd)
     }
     SystemCall(CCVisSys.SYS_EXIT, 0, 0, 0, 0, 0)
 }

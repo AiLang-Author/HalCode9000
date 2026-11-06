@@ -1,6 +1,6 @@
 // cc_skills_ipc.ailang — Skills tool: list and read skill markdown files.
 //
-// Skills live in <app_dir>/skills/{ailang,halcode,tools,general,haiku}/<name>/SKILL.md
+// Skills live in <app_dir>/skills/{ailang,halcode,tools,general}/<name>/SKILL.md
 // The app dir is derived from argv[0] (the binary path) so skills always live
 // next to the binary regardless of which user runs it.
 //
@@ -14,10 +14,10 @@
 // Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.
 
 LibraryImport.Arena
-LibraryImport.Socket
 LibraryImport.JSON
 LibraryImport.StringUtils
 LibraryImport.UtilArgs
+Import.Platform.IPC
 
 FixedPool.CCSkillsSys {
     "SYS_READ":   Initialize=0
@@ -52,7 +52,7 @@ Function.CCSkills_BuildSchema {
     Input: tool_name: Address
     Output: Address
     Body: {
-        s = UtilArgs_NewSchema(tool_name, "List or read skill markdown files from <app>/skills/{ailang,halcode,tools,general,haiku}/")
+        s = UtilArgs_NewSchema(tool_name, "List or read skill markdown files from <app>/skills/{ailang,halcode,tools,general}/")
         UtilArgs_AddField(s, "op",   "string", 1, "Operation: list | read",                     "op")
         UtilArgs_AddField(s, "name", "string", 0, "Skill name without .md (required for read)", "name")
         ReturnValue(s)
@@ -364,7 +364,7 @@ Function.CCSkills_DoList {
     Body: {
         // Recurse two levels: skills/<category>/<name>/SKILL.md
         // Emit "category/name" lines via sed — avoids nested-quote shell complexity.
-        cmd = StringConcat("find -L ", CCSkillsConst.SKILLS_DIR)
+        cmd = StringConcat("find ", CCSkillsConst.SKILLS_DIR)
         cmd = StringConcat(cmd, " -mindepth 3 -maxdepth 3 -name 'SKILL.md' 2>/dev/null | sed 's|.*/\([^/]*/[^/]*\)/SKILL.md$|\1|' | sort")
         raw = CCSkills_ShellCapture(cmd, CCSkillsConst.MAX_LIST)
         IfCondition EqualTo(raw, 0) ThenBlock: {
@@ -386,7 +386,7 @@ Function.CCSkills_DoRead {
             ReturnValue(0)
         }
         // Find skill anywhere under skills/<category>/<name>/SKILL.md
-        find_cmd = StringConcat("find -L ", CCSkillsConst.SKILLS_DIR)
+        find_cmd = StringConcat("find ", CCSkillsConst.SKILLS_DIR)
         find_cmd = StringConcat(find_cmd, " -mindepth 3 -maxdepth 3 -name 'SKILL.md' -path '*/")
         find_cmd = StringConcat(find_cmd, name)
         find_cmd = StringConcat(find_cmd, "/SKILL.md' 2>/dev/null | head -1")
@@ -436,7 +436,7 @@ Function.CCSkills_SendError {
         IfCondition NotEqual(id, 0) ThenBlock: { JSON.SetString(resp, "id", id) }
         JSON.SetBool(resp, "ok", 0)
         JSON.SetString(resp, "error", error_msg)
-        Socket.SendMsg(client_fd, JSON.SerializeObject(resp))
+        PlatformIPC_SendMsg(client_fd, JSON.SerializeObject(resp))
     }
 }
 
@@ -450,7 +450,7 @@ Function.CCSkills_SendResult {
         IfCondition NotEqual(id, 0) ThenBlock: { JSON.SetString(resp, "id", id) }
         JSON.SetBool(resp, "ok", 1)
         JSON.SetString(resp, "content", content)
-        Socket.SendMsg(client_fd, JSON.SerializeObject(resp))
+        PlatformIPC_SendMsg(client_fd, JSON.SerializeObject(resp))
     }
 }
 
@@ -463,7 +463,7 @@ Function.CCSkills_SendSchema {
         resp = JSON.NewObject()
         JSON.SetString(resp, "method", "schema_response")
         IfCondition NotEqual(schema_obj, 0) ThenBlock: { JSON.SetObject(resp, "schema", schema_obj) }
-        Socket.SendMsg(client_fd, JSON.SerializeObject(resp))
+        PlatformIPC_SendMsg(client_fd, JSON.SerializeObject(resp))
     }
 }
 
@@ -565,10 +565,8 @@ SubRoutine.Main {
     SystemCall(CCSkillsSys.SYS_MKDIR, CCSkillsConst.SOCK_DIR, 493, 0, 0, 0)
     SystemCall(CCSkillsSys.SYS_UNLINK, CCSkillsConst.SOCK_PATH, 0, 0, 0, 0)
 
-    fd = Socket.Create(1, 1)
+    fd = PlatformIPC_Listen(CCSkillsConst.SOCK_PATH, CCSkillsConst.BACKLOG)
     IfCondition LessThan(fd, 0) ThenBlock: { Exit(1) }
-    Socket.BindUnix(fd, CCSkillsConst.SOCK_PATH)
-    Socket.Listen(fd, CCSkillsConst.BACKLOG)
     CCSkillsState.listen_fd = fd
 
     PrintMessage("[cc_skills_ipc] listening on ")
@@ -579,11 +577,11 @@ SubRoutine.Main {
     PrintMessage("\n")
 
     WhileLoop EqualTo(CCSkillsState.running, 1) {
-        client_fd = Socket.Accept(CCSkillsState.listen_fd)
+        client_fd = PlatformIPC_Accept(CCSkillsState.listen_fd)
         IfCondition GreaterEqual(client_fd, 0) ThenBlock: {
             done = 0
             WhileLoop EqualTo(done, 0) {
-                req = Socket.RecvMsg(client_fd)
+                req = PlatformIPC_RecvMsg(client_fd)
                 IfCondition EqualTo(req, 0) ThenBlock: { done = 1 }
                 IfCondition NotEqual(req, 0) ThenBlock: {
                     IfCondition NotEqual(req, -1) ThenBlock: {
@@ -591,7 +589,9 @@ SubRoutine.Main {
                     }
                 }
             }
-            Socket.Close(client_fd)
+            IfCondition NotEqual(client_fd, CCSkillsState.listen_fd) ThenBlock: {
+                PlatformIPC_Close(client_fd)
+            }
         }
     }
     Exit(0)

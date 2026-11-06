@@ -11,12 +11,12 @@
 // Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.
 
 LibraryImport.Arena
-LibraryImport.Socket
 LibraryImport.JSON
 LibraryImport.StringUtils
 LibraryImport.Hash
 LibraryImport.Array
 LibraryImport.UtilArgs
+Import.Platform.IPC
 
 // Packager modules
 Import.Packager.Packager.IO
@@ -447,7 +447,7 @@ Function.CCPkg_SendError {
         IfCondition NotEqual(id, 0) ThenBlock: { JSON.SetString(resp, "id", id) }
         JSON.SetBool(resp, "ok", 0)
         JSON.SetString(resp, "error", msg)
-        Socket.SendMsg(client_fd, JSON.SerializeObject(resp))
+        PlatformIPC_SendMsg(client_fd, JSON.SerializeObject(resp))
     }
 }
 
@@ -461,7 +461,7 @@ Function.CCPkg_SendResult {
         IfCondition NotEqual(id, 0) ThenBlock: { JSON.SetString(resp, "id", id) }
         JSON.SetBool(resp, "ok", 1)
         JSON.SetString(resp, "content", content)
-        Socket.SendMsg(client_fd, JSON.SerializeObject(resp))
+        PlatformIPC_SendMsg(client_fd, JSON.SerializeObject(resp))
     }
 }
 
@@ -474,7 +474,7 @@ Function.CCPkg_SendSchema {
         resp = JSON.NewObject()
         JSON.SetString(resp, "method", "schema_response")
         IfCondition NotEqual(schema_obj, 0) ThenBlock: { JSON.SetObject(resp, "schema", schema_obj) }
-        Socket.SendMsg(client_fd, JSON.SerializeObject(resp))
+        PlatformIPC_SendMsg(client_fd, JSON.SerializeObject(resp))
     }
 }
 
@@ -578,22 +578,20 @@ SubRoutine.Main {
     CCPkgState.schema  = CCPkg_BuildSchema()
     CCPkgState.out_buf = Allocate(Add(CCPkgConst.OUT_CAP, 1))
 
-    fd = Socket.Create(1, 1)
+    fd = PlatformIPC_Listen(CCPkgConst.SOCK_PATH, CCPkgConst.BACKLOG)
     IfCondition LessThan(fd, 0) ThenBlock: {
         PrintMessage("[cc_packager_ipc] socket create failed")
         Exit(1)
     }
-    Socket.BindUnix(fd, CCPkgConst.SOCK_PATH)
-    Socket.Listen(fd, CCPkgConst.BACKLOG)
     CCPkgState.listen_fd = fd
     PrintMessage("[cc_packager_ipc] listening on @halcode/Packager")
 
     WhileLoop EqualTo(CCPkgState.running, 1) {
-        client_fd = Socket.Accept(CCPkgState.listen_fd)
+        client_fd = PlatformIPC_Accept(CCPkgState.listen_fd)
         IfCondition GreaterEqual(client_fd, 0) ThenBlock: {
             done = 0
             WhileLoop EqualTo(done, 0) {
-                req = Socket.RecvMsg(client_fd)
+                req = PlatformIPC_RecvMsg(client_fd)
                 IfCondition EqualTo(req, 0) ThenBlock: { done = 1 }
                 IfCondition NotEqual(req, 0) ThenBlock: {
                     IfCondition NotEqual(req, -1) ThenBlock: {
@@ -601,10 +599,12 @@ SubRoutine.Main {
                     }
                 }
             }
-            Socket.Close(client_fd)
+            IfCondition NotEqual(client_fd, CCPkgState.listen_fd) ThenBlock: {
+                PlatformIPC_Close(client_fd)
+            }
         }
     }
-    Socket.Close(CCPkgState.listen_fd)
+    PlatformIPC_Close(CCPkgState.listen_fd)
     Exit(0)
 }
 

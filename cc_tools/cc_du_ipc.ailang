@@ -11,10 +11,10 @@
 // Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.
 
 LibraryImport.Arena
-LibraryImport.Socket
 LibraryImport.JSON
 LibraryImport.StringUtils
 LibraryImport.UtilArgs
+Import.Platform.IPC
 
 FixedPool.CCDuSys {
     "SYS_CLOSE":     Initialize=3
@@ -288,7 +288,7 @@ Function.CCDu_SendError {
         IfCondition NotEqual(id, 0) ThenBlock: { JSON.SetString(resp, "id", id) }
         JSON.SetBool(resp, "ok", 0)
         JSON.SetString(resp, "error", msg)
-        Socket.SendMsg(client_fd, JSON.SerializeObject(resp))
+        PlatformIPC_SendMsg(client_fd, JSON.SerializeObject(resp))
     }
 }
 
@@ -303,7 +303,7 @@ Function.CCDu_SendResult {
         JSON.SetBool(resp, "ok", 1)
         JSON.SetString(resp, "content", CCDuState.result_buf)
         IfCondition EqualTo(truncated, 1) ThenBlock: { JSON.SetBool(resp, "truncated", 1) }
-        Socket.SendMsg(client_fd, JSON.SerializeObject(resp))
+        PlatformIPC_SendMsg(client_fd, JSON.SerializeObject(resp))
     }
 }
 
@@ -316,7 +316,7 @@ Function.CCDu_SendSchema {
         resp = JSON.NewObject()
         JSON.SetString(resp, "method", "schema_response")
         IfCondition NotEqual(schema_obj, 0) ThenBlock: { JSON.SetObject(resp, "schema", schema_obj) }
-        Socket.SendMsg(client_fd, JSON.SerializeObject(resp))
+        PlatformIPC_SendMsg(client_fd, JSON.SerializeObject(resp))
     }
 }
 
@@ -399,22 +399,20 @@ SubRoutine.Main {
     SystemCall(CCDuSys.SYS_MKDIR, "/tmp/ailang_cctools", 493, 0, 0, 0)
     SystemCall(CCDuSys.SYS_UNLINK, CCDuConst.SOCK_PATH, 0, 0, 0, 0)
 
-    fd = Socket.Create(1, 1)
+    fd = PlatformIPC_Listen(CCDuConst.SOCK_PATH, CCDuConst.BACKLOG)
     IfCondition LessThan(fd, 0) ThenBlock: {
         PrintMessage("[cc_du_ipc] socket create failed\n")
         Exit(1)
     }
-    Socket.BindUnix(fd, CCDuConst.SOCK_PATH)
-    Socket.Listen(fd, CCDuConst.BACKLOG)
     CCDuState.listen_fd = fd
     PrintMessage("[cc_du_ipc] listening on @halcode/Du\n")
 
     WhileLoop EqualTo(CCDuState.running, 1) {
-        client_fd = Socket.Accept(CCDuState.listen_fd)
+        client_fd = PlatformIPC_Accept(CCDuState.listen_fd)
         IfCondition GreaterEqual(client_fd, 0) ThenBlock: {
             done = 0
             WhileLoop EqualTo(done, 0) {
-                req = Socket.RecvMsg(client_fd)
+                req = PlatformIPC_RecvMsg(client_fd)
                 IfCondition EqualTo(req, 0) ThenBlock: { done = 1 }
                 IfCondition NotEqual(req, 0) ThenBlock: {
                     IfCondition NotEqual(req, -1) ThenBlock: {
@@ -422,10 +420,12 @@ SubRoutine.Main {
                     }
                 }
             }
-            Socket.Close(client_fd)
+            IfCondition NotEqual(client_fd, CCDuState.listen_fd) ThenBlock: {
+                PlatformIPC_Close(client_fd)
+            }
         }
     }
-    Socket.Close(CCDuState.listen_fd)
+    PlatformIPC_Close(CCDuState.listen_fd)
     Exit(0)
 }
 

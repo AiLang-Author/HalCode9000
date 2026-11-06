@@ -7,10 +7,10 @@
 // Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.
 
 LibraryImport.Arena
-LibraryImport.Socket
 LibraryImport.JSON
 LibraryImport.StringUtils
 LibraryImport.UtilArgs
+Import.Platform.IPC
 
 FixedPool.CCOlySys {
     "SYS_READ":      Initialize=0
@@ -364,7 +364,7 @@ Function.CCOly_SendError {
         IfCondition NotEqual(id, 0) ThenBlock: { JSON.SetString(resp, "id", id) }
         JSON.SetBool(resp, "ok", 0)
         JSON.SetString(resp, "error", msg)
-        Socket.SendMsg(client_fd, JSON.SerializeObject(resp))
+        PlatformIPC_SendMsg(client_fd, JSON.SerializeObject(resp))
     }
 }
 
@@ -378,7 +378,7 @@ Function.CCOly_SendResult {
         IfCondition NotEqual(id, 0) ThenBlock: { JSON.SetString(resp, "id", id) }
         JSON.SetBool(resp, "ok", 1)
         IfCondition NotEqual(content, 0) ThenBlock: { JSON.SetString(resp, "content", content) }
-        Socket.SendMsg(client_fd, JSON.SerializeObject(resp))
+        PlatformIPC_SendMsg(client_fd, JSON.SerializeObject(resp))
     }
 }
 
@@ -391,7 +391,7 @@ Function.CCOly_SendSchema {
         resp = JSON.NewObject()
         JSON.SetString(resp, "method", "schema_response")
         IfCondition NotEqual(schema_obj, 0) ThenBlock: { JSON.SetObject(resp, "schema", schema_obj) }
-        Socket.SendMsg(client_fd, JSON.SerializeObject(resp))
+        PlatformIPC_SendMsg(client_fd, JSON.SerializeObject(resp))
     }
 }
 
@@ -474,22 +474,20 @@ SubRoutine.Main {
     SystemCall(CCOlySys.SYS_MKDIR, "/tmp/ailang_cctools", 493, 0, 0, 0)
     SystemCall(CCOlySys.SYS_UNLINK, CCOlyConst.SOCK_PATH, 0, 0, 0, 0)
 
-    fd = Socket.Create(1, 1)
+    fd = PlatformIPC_Listen(CCOlyConst.SOCK_PATH, CCOlyConst.BACKLOG)
     IfCondition LessThan(fd, 0) ThenBlock: {
         PrintMessage("[cc_olympus_ipc] socket create failed\n")
         Exit(1)
     }
-    Socket.BindUnix(fd, CCOlyConst.SOCK_PATH)
-    Socket.Listen(fd, CCOlyConst.BACKLOG)
     CCOlyState.listen_fd = fd
     PrintMessage("[cc_olympus_ipc] listening on @halcode/Olympus\n")
 
     WhileLoop EqualTo(CCOlyState.running, 1) {
-        client_fd = Socket.Accept(CCOlyState.listen_fd)
+        client_fd = PlatformIPC_Accept(CCOlyState.listen_fd)
         IfCondition GreaterEqual(client_fd, 0) ThenBlock: {
             done = 0
             WhileLoop EqualTo(done, 0) {
-                req = Socket.RecvMsg(client_fd)
+                req = PlatformIPC_RecvMsg(client_fd)
                 IfCondition EqualTo(req, 0) ThenBlock: { done = 1 }
                 IfCondition NotEqual(req, 0) ThenBlock: {
                     IfCondition NotEqual(req, -1) ThenBlock: {
@@ -497,10 +495,12 @@ SubRoutine.Main {
                     }
                 }
             }
-            Socket.Close(client_fd)
+            IfCondition NotEqual(client_fd, CCOlyState.listen_fd) ThenBlock: {
+                PlatformIPC_Close(client_fd)
+            }
         }
     }
-    Socket.Close(CCOlyState.listen_fd)
+    PlatformIPC_Close(CCOlyState.listen_fd)
     Exit(0)
 }
 

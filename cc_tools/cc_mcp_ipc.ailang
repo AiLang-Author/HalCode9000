@@ -12,9 +12,9 @@
 // Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.
 
 LibraryImport.Arena
-LibraryImport.Socket
 LibraryImport.JSON
 LibraryImport.StringUtils
+Import.Platform.IPC
 
 FixedPool.MCPSys {
     "SYS_READ":      Initialize=0
@@ -244,21 +244,16 @@ Function.HC_CallTool {
     Input: timeout_ms: Integer
     Output: Address
     Body: {
-        fd = Socket.Create(1, 1)
+        fd = PlatformIPC_Connect(sock_path)
         IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
-        rc = Socket.ConnectUnix(fd, sock_path)
-        IfCondition LessThan(rc, 0) ThenBlock: {
-            Socket.Close(fd)
-            ReturnValue(0)
-        }
-        Socket.SetRecvTimeout(fd, timeout_ms)
+        PlatformIPC_SetRecvTimeout(fd, timeout_ms)
 
         envelope = StringConcat("{\"method\":\"call\",\"id\":\"1\",\"args\":", args_json)
         envelope = StringConcat(envelope, "}")
-        Socket.SendMsg(fd, envelope)
+        PlatformIPC_SendMsg(fd, envelope)
 
-        resp_str = Socket.RecvMsg(fd)
-        Socket.Close(fd)
+        resp_str = PlatformIPC_RecvMsg(fd)
+        PlatformIPC_Close(fd)
         IfCondition EqualTo(resp_str, 0) ThenBlock: { ReturnValue(0) }
 
         parsed   = ParseJSON(resp_str)
@@ -280,20 +275,18 @@ Function.HC_PollPgmem {
     Input: key: Address
     Output: Address
     Body: {
-        fd = Socket.Create(1, 1)
+        fd = PlatformIPC_Connect("@halcode/Pgmem")
         IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
-        rc = Socket.ConnectUnix(fd, "@halcode/Pgmem")
-        IfCondition LessThan(rc, 0) ThenBlock: { Socket.Close(fd) ReturnValue(0) }
-        Socket.SetRecvTimeout(fd, 5000)
+        PlatformIPC_SetRecvTimeout(fd, 5000)
 
         pg_args  = StringConcat("{\"op\":\"pickup\",\"key\":\"", key)
         pg_args  = StringConcat(pg_args, "\"}")
         envelope = StringConcat("{\"method\":\"call\",\"id\":\"1\",\"args\":", pg_args)
         envelope = StringConcat(envelope, "}")
-        Socket.SendMsg(fd, envelope)
+        PlatformIPC_SendMsg(fd, envelope)
 
-        resp_str = Socket.RecvMsg(fd)
-        Socket.Close(fd)
+        resp_str = PlatformIPC_RecvMsg(fd)
+        PlatformIPC_Close(fd)
         IfCondition EqualTo(resp_str, 0) ThenBlock: { ReturnValue(0) }
 
         parsed   = ParseJSON(resp_str)
@@ -452,12 +445,12 @@ Function.CCMcp_SendError {
             resp    = StringConcat(resp, "\",\"ok\":false,\"error\":\"")
             resp    = StringConcat(resp, esc)
             resp    = StringConcat(resp, "\"}")
-            Socket.SendMsg(client_fd, resp)
+            PlatformIPC_SendMsg(client_fd, resp)
             ReturnValue(0)
         }
         resp = StringConcat("{\"method\":\"result\",\"ok\":false,\"error\":\"", esc)
         resp = StringConcat(resp, "\"}")
-        Socket.SendMsg(client_fd, resp)
+        PlatformIPC_SendMsg(client_fd, resp)
     }
 }
 
@@ -475,12 +468,12 @@ Function.CCMcp_SendResult {
             resp   = StringConcat(resp, "\",\"ok\":true,\"content\":\"")
             resp   = StringConcat(resp, esc_c)
             resp   = StringConcat(resp, "\"}")
-            Socket.SendMsg(client_fd, resp)
+            PlatformIPC_SendMsg(client_fd, resp)
             ReturnValue(0)
         }
         resp = StringConcat("{\"method\":\"result\",\"ok\":true,\"content\":\"", esc_c)
         resp = StringConcat(resp, "\"}")
-        Socket.SendMsg(client_fd, resp)
+        PlatformIPC_SendMsg(client_fd, resp)
     }
 }
 
@@ -490,7 +483,7 @@ Function.CCMcp_SendSchema {
         schema_str = "{\"name\":\"MCP\",\"description\":\"Model Context Protocol bridge. Launches an MCP server as a subprocess and calls the specified tool.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"server_cmd\":{\"type\":\"string\"},\"server_args\":{\"type\":\"string\"},\"tool_name\":{\"type\":\"string\"},\"tool_args\":{\"type\":\"object\"}},\"required\":[\"server_cmd\",\"server_args\",\"tool_name\",\"tool_args\"]}}"
         resp = StringConcat("{\"method\":\"schema_response\",\"schema\":", schema_str)
         resp = StringConcat(resp, "}")
-        Socket.SendMsg(client_fd, resp)
+        PlatformIPC_SendMsg(client_fd, resp)
     }
 }
 
@@ -541,24 +534,24 @@ Function.CCMcp_HandleRequest {
 Function.CCMcp_RunDaemon {
     Input: sock_path: Address
     Body: {
-        fd = Socket.Create(1, 1)
+        fd = PlatformIPC_Listen(sock_path, CCMcpConst.BACKLOG)
         IfCondition LessThan(fd, 0) ThenBlock: { Exit(1) }
-        Socket.BindUnix(fd, sock_path)
-        Socket.Listen(fd, CCMcpConst.BACKLOG)
         CCMcpState.listen_fd = fd
 
         WhileLoop EqualTo(CCMcpState.running, 1) {
-            client_fd = Socket.Accept(CCMcpState.listen_fd)
+            client_fd = PlatformIPC_Accept(CCMcpState.listen_fd)
             IfCondition GreaterEqual(client_fd, 0) ThenBlock: {
                 done = 0
                 WhileLoop EqualTo(done, 0) {
-                    req = Socket.RecvMsg(client_fd)
+                    req = PlatformIPC_RecvMsg(client_fd)
                     IfCondition EqualTo(req, 0) ThenBlock: { done = 1 }
                     IfCondition NotEqual(req, 0) ThenBlock: {
                         CCMcp_HandleRequest(client_fd, req)
                     }
                 }
-                Socket.Close(client_fd)
+                IfCondition NotEqual(client_fd, CCMcpState.listen_fd) ThenBlock: {
+                    PlatformIPC_Close(client_fd)
+                }
             }
         }
     }

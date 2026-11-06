@@ -12,10 +12,10 @@
 // Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.
 
 LibraryImport.Arena
-LibraryImport.Socket
 LibraryImport.JSON
 LibraryImport.StringUtils
 LibraryImport.UtilArgs
+Import.Platform.IPC
 
 FixedPool.CCFindSys {
     "SYS_CLOSE":      Initialize=3
@@ -380,7 +380,7 @@ Function.CCFind_SendError {
         IfCondition NotEqual(id, 0) ThenBlock: { JSON.SetString(resp, "id", id) }
         JSON.SetBool(resp, "ok", 0)
         JSON.SetString(resp, "error", msg)
-        Socket.SendMsg(client_fd, JSON.SerializeObject(resp))
+        PlatformIPC_SendMsg(client_fd, JSON.SerializeObject(resp))
     }
 }
 
@@ -396,7 +396,7 @@ Function.CCFind_SendResult {
         JSON.SetBool(resp, "ok", 1)
         JSON.SetString(resp, "content", content)
         IfCondition EqualTo(truncated, 1) ThenBlock: { JSON.SetBool(resp, "truncated", 1) }
-        Socket.SendMsg(client_fd, JSON.SerializeObject(resp))
+        PlatformIPC_SendMsg(client_fd, JSON.SerializeObject(resp))
     }
 }
 
@@ -409,7 +409,7 @@ Function.CCFind_SendSchema {
         resp = JSON.NewObject()
         JSON.SetString(resp, "method", "schema_response")
         IfCondition NotEqual(schema_obj, 0) ThenBlock: { JSON.SetObject(resp, "schema", schema_obj) }
-        Socket.SendMsg(client_fd, JSON.SerializeObject(resp))
+        PlatformIPC_SendMsg(client_fd, JSON.SerializeObject(resp))
     }
 }
 
@@ -484,6 +484,16 @@ Function.CCFind_HandleRequest {
                 IfCondition GreaterThan(mr, 0) ThenBlock: { CCFindState.max_results = mr }
             }
 
+            // A missing path used to be echoed as a match. Require a directory.
+            probe_flags = BitwiseOr(CCFindSys.O_RDONLY, CCFindSys.O_DIRECTORY)
+            probe_fd = SystemCall(CCFindSys.SYS_OPENAT, CCFindSys.AT_FDCWD, path, probe_flags, 0, 0)
+            IfCondition LessThan(probe_fd, 0) ThenBlock: {
+                CCFind_SendError(client_fd, id, StringConcat("not a directory: ", path))
+                JSON.Free(parsed)
+                ReturnValue(0)
+            }
+            SystemCall(CCFindSys.SYS_CLOSE, probe_fd, 0, 0, 0, 0)
+
             // Run search
             CCFind_ProcessDir(path, 0)
 
@@ -513,26 +523,21 @@ SubRoutine.Main {
     SystemCall(CCFindSys.SYS_MKDIR, "/tmp/ailang_cctools", 493, 0, 0, 0)
     SystemCall(CCFindSys.SYS_UNLINK, CCFindConst.SOCK_PATH, 0, 0, 0, 0)
 
-    fd = Socket.Create(1, 1)
+    fd = PlatformIPC_Listen(CCFindConst.SOCK_PATH, CCFindConst.BACKLOG)
     IfCondition LessThan(fd, 0) ThenBlock: {
-        PrintMessage("[cc_find_ipc] socket create failed\n")
+        PrintMessage("[cc_find_ipc] listen failed
+")
         Exit(1)
     }
-    br = Socket.BindUnix(fd, CCFindConst.SOCK_PATH)
-    IfCondition LessThan(br, 0) ThenBlock: {
-        PrintMessage("[cc_find_ipc] bind failed\n")
-        Socket.Close(fd)  Exit(1)
-    }
-    Socket.Listen(fd, CCFindConst.BACKLOG)
     CCFindState.listen_fd = fd
     PrintMessage("[cc_find_ipc] listening on @halcode/Find\n")
 
     WhileLoop EqualTo(CCFindState.running, 1) {
-        client_fd = Socket.Accept(CCFindState.listen_fd)
+        client_fd = PlatformIPC_Accept(CCFindState.listen_fd)
         IfCondition GreaterEqual(client_fd, 0) ThenBlock: {
             done = 0
             WhileLoop EqualTo(done, 0) {
-                req = Socket.RecvMsg(client_fd)
+                req = PlatformIPC_RecvMsg(client_fd)
                 IfCondition EqualTo(req, 0) ThenBlock: { done = 1 }
                 IfCondition NotEqual(req, 0) ThenBlock: {
                     IfCondition NotEqual(req, -1) ThenBlock: {
@@ -540,10 +545,12 @@ SubRoutine.Main {
                     }
                 }
             }
-            Socket.Close(client_fd)
+            IfCondition NotEqual(client_fd, CCFindState.listen_fd) ThenBlock: {
+                PlatformIPC_Close(client_fd)
+            }
         }
     }
-    Socket.Close(CCFindState.listen_fd)
+    PlatformIPC_Close(CCFindState.listen_fd)
     Exit(0)
 }
 

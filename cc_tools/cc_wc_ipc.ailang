@@ -7,15 +7,16 @@
 // Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.
 
 LibraryImport.Arena
-LibraryImport.Socket
 LibraryImport.JSON
 LibraryImport.StringUtils
 LibraryImport.UtilArgs
+Import.Platform.IPC
 
 FixedPool.CCWcSys {
     "SYS_READ":   Initialize=0
     "SYS_OPEN":   Initialize=2
     "SYS_CLOSE":  Initialize=3
+    "SYS_FSTAT":  Initialize=5
     "SYS_MKDIR":  Initialize=83
     "SYS_UNLINK": Initialize=87
 }
@@ -93,6 +94,19 @@ Function.CCWc_DoCount {
         fd = SystemCall(CCWcSys.SYS_OPEN, path, 0, 0)
         IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
 
+        st = Allocate(144)
+        fs = SystemCall(CCWcSys.SYS_FSTAT, fd, st, 0, 0)
+        is_dir = 0
+        IfCondition GreaterEqual(fs, 0) ThenBlock: {
+            mode = Add(GetByte(st, 24), Multiply(GetByte(st, 25), 256))
+            IfCondition EqualTo(BitwiseAnd(mode, 61440), 16384) ThenBlock: { is_dir = 1 }
+        }
+        Deallocate(st, 144)
+        IfCondition EqualTo(is_dir, 1) ThenBlock: {
+            SystemCall(CCWcSys.SYS_CLOSE, fd, 0, 0, 0, 0)
+            ReturnValue(-1)
+        }
+
         buf = Allocate(CCWcConst.READ_CHUNK)
         lines = 0
         words = 0
@@ -158,7 +172,7 @@ Function.CCWc_SendError {
         IfCondition NotEqual(id, 0) ThenBlock: { JSON.SetString(resp, "id", id) }
         JSON.SetBool(resp, "ok", 0)
         JSON.SetString(resp, "error", msg)
-        Socket.SendMsg(client_fd, JSON.SerializeObject(resp))
+        PlatformIPC_SendMsg(client_fd, JSON.SerializeObject(resp))
     }
 }
 
@@ -172,7 +186,7 @@ Function.CCWc_SendResult {
         IfCondition NotEqual(id, 0) ThenBlock: { JSON.SetString(resp, "id", id) }
         JSON.SetBool(resp, "ok", 1)
         JSON.SetString(resp, "content", content)
-        Socket.SendMsg(client_fd, JSON.SerializeObject(resp))
+        PlatformIPC_SendMsg(client_fd, JSON.SerializeObject(resp))
     }
 }
 
@@ -185,7 +199,7 @@ Function.CCWc_SendSchema {
         resp = JSON.NewObject()
         JSON.SetString(resp, "method", "schema_response")
         IfCondition NotEqual(schema_obj, 0) ThenBlock: { JSON.SetObject(resp, "schema", schema_obj) }
-        Socket.SendMsg(client_fd, JSON.SerializeObject(resp))
+        PlatformIPC_SendMsg(client_fd, JSON.SerializeObject(resp))
     }
 }
 
@@ -231,6 +245,11 @@ Function.CCWc_HandleRequest {
                 CCWc_SendError(client_fd, id, err)
                 JSON.Free(parsed)  ReturnValue(0)
             }
+            IfCondition LessThan(ok, 0) ThenBlock: {
+                err = StringConcat("is a directory: ", path)
+                CCWc_SendError(client_fd, id, err)
+                JSON.Free(parsed)  ReturnValue(0)
+            }
             CCWcState.out_pos = 0
             CCWc_AppendStr("lines: ")  CCWc_AppendInt(CCWcState.lines)  CCWc_AppendStr("\n")
             CCWc_AppendStr("words: ")  CCWc_AppendInt(CCWcState.words)  CCWc_AppendStr("\n")
@@ -253,22 +272,20 @@ SubRoutine.Main {
     SystemCall(CCWcSys.SYS_MKDIR, "/tmp/ailang_cctools", 493, 0, 0, 0)
     SystemCall(CCWcSys.SYS_UNLINK, CCWcConst.SOCK_PATH, 0, 0, 0, 0)
 
-    fd = Socket.Create(1, 1)
+    fd = PlatformIPC_Listen(CCWcConst.SOCK_PATH, CCWcConst.BACKLOG)
     IfCondition LessThan(fd, 0) ThenBlock: {
         PrintMessage("[cc_wc_ipc] socket create failed\n")
         Exit(1)
     }
-    Socket.BindUnix(fd, CCWcConst.SOCK_PATH)
-    Socket.Listen(fd, CCWcConst.BACKLOG)
     CCWcState.listen_fd = fd
     PrintMessage("[cc_wc_ipc] listening on @halcode/Wc\n")
 
     WhileLoop EqualTo(CCWcState.running, 1) {
-        client_fd = Socket.Accept(CCWcState.listen_fd)
+        client_fd = PlatformIPC_Accept(CCWcState.listen_fd)
         IfCondition GreaterEqual(client_fd, 0) ThenBlock: {
             done = 0
             WhileLoop EqualTo(done, 0) {
-                req = Socket.RecvMsg(client_fd)
+                req = PlatformIPC_RecvMsg(client_fd)
                 IfCondition EqualTo(req, 0) ThenBlock: { done = 1 }
                 IfCondition NotEqual(req, 0) ThenBlock: {
                     IfCondition NotEqual(req, -1) ThenBlock: {
@@ -276,10 +293,12 @@ SubRoutine.Main {
                     }
                 }
             }
-            Socket.Close(client_fd)
+            IfCondition NotEqual(client_fd, CCWcState.listen_fd) ThenBlock: {
+                PlatformIPC_Close(client_fd)
+            }
         }
     }
-    Socket.Close(CCWcState.listen_fd)
+    PlatformIPC_Close(CCWcState.listen_fd)
     Exit(0)
 }
 

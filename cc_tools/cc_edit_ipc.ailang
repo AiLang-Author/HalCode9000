@@ -14,10 +14,10 @@
 // Copyright 2026 Sean Collins, 2 Paws Machine and Engineering. MIT.
 
 LibraryImport.Arena
-LibraryImport.Socket
 LibraryImport.JSON
 LibraryImport.StringUtils
 LibraryImport.UtilArgs
+Import.Platform.IPC
 
 FixedPool.CCEditSys {
     "SYS_READ":   Initialize=0
@@ -521,7 +521,7 @@ Function.CCEdit_SendError {
         JSON.SetBool(resp, "ok", 0)
         JSON.SetString(resp, "error", error_msg)
         out = JSON.SerializeObject(resp)
-        Socket.SendMsg(client_fd, out)
+        PlatformIPC_SendMsg(client_fd, out)
     }
 }
 
@@ -536,7 +536,7 @@ Function.CCEdit_SendResult {
         JSON.SetBool(resp, "ok", 1)
         JSON.SetString(resp, "content", content)
         out = JSON.SerializeObject(resp)
-        Socket.SendMsg(client_fd, out)
+        PlatformIPC_SendMsg(client_fd, out)
     }
 }
 
@@ -552,7 +552,7 @@ Function.CCEdit_SendSchema {
             JSON.SetObject(resp, "schema", schema_obj)
         }
         out = JSON.SerializeObject(resp)
-        Socket.SendMsg(client_fd, out)
+        PlatformIPC_SendMsg(client_fd, out)
     }
 }
 
@@ -614,26 +614,21 @@ SubRoutine.Main {
     SystemCall(CCEditSys.SYS_MKDIR, "/tmp/ailang_cctools", 493, 0, 0, 0)
     SystemCall(CCEditSys.SYS_UNLINK, CCEditConst.SOCK_PATH, 0, 0, 0, 0)
 
-    fd = Socket.Create(1, 1)
+    fd = PlatformIPC_Listen(CCEditConst.SOCK_PATH, CCEditConst.BACKLOG)
     IfCondition LessThan(fd, 0) ThenBlock: {
-        PrintMessage("[cc_edit_ipc] socket create failed\n")
+        PrintMessage("[cc_edit_ipc] listen failed
+")
         Exit(1)
     }
-    br = Socket.BindUnix(fd, CCEditConst.SOCK_PATH)
-    IfCondition LessThan(br, 0) ThenBlock: {
-        PrintMessage("[cc_edit_ipc] bind failed\n")
-        Socket.Close(fd)  Exit(1)
-    }
-    Socket.Listen(fd, CCEditConst.BACKLOG)
     CCEditState.listen_fd = fd
     PrintMessage("[cc_edit_ipc] listening on @halcode/Edit\n")
 
     WhileLoop EqualTo(CCEditState.running, 1) {
-        client_fd = Socket.Accept(CCEditState.listen_fd)
+        client_fd = PlatformIPC_Accept(CCEditState.listen_fd)
         IfCondition GreaterEqual(client_fd, 0) ThenBlock: {
             done = 0
             WhileLoop EqualTo(done, 0) {
-                req = Socket.RecvMsg(client_fd)
+                req = PlatformIPC_RecvMsg(client_fd)
                 IfCondition EqualTo(req, 0) ThenBlock: { done = 1 }
                 IfCondition NotEqual(req, 0) ThenBlock: {
                     IfCondition NotEqual(req, -1) ThenBlock: {
@@ -641,11 +636,13 @@ SubRoutine.Main {
                     }
                 }
             }
-            Socket.Close(client_fd)
+            IfCondition NotEqual(client_fd, CCEditState.listen_fd) ThenBlock: {
+                PlatformIPC_Close(client_fd)
+            }
         }
     }
 
-    Socket.Close(CCEditState.listen_fd)
+    PlatformIPC_Close(CCEditState.listen_fd)
     Exit(0)
 }
 
