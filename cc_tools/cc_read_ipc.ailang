@@ -51,6 +51,7 @@ FixedPool.CCReadState {
     "schema":        Initialize=0, CanChange=True
     "listen_fd":     Initialize=-1, CanChange=True
     "running":       Initialize=1, CanChange=True
+    "content_cap":   Initialize=0, CanChange=True
 }
 
 // =============================================================================
@@ -175,6 +176,7 @@ Function.CCRead_DoRead {
 
         // Allocate want+1 for null terminator
         buf = Allocate(Add(want, 1))
+        CCReadState.content_cap = Add(want, 1)
         total = 0
         WhileLoop LessThan(total, want) {
             n = SystemCall(CCReadSys.SYS_READ, fd, Add(buf, total), Subtract(want, total), 0, 0)
@@ -214,6 +216,28 @@ Function.CCRead_DoRead {
 // =============================================================================
 // REQUEST DISPATCH
 // =============================================================================
+// Free a response built with JSON.Set*: the tags and the hash, not the
+// values. Set* stores the caller's pointers, so the values are borrowed.
+Function.CCRead_FreeShallow {
+    Input: obj: Address
+    Body: {
+        IfCondition EqualTo(obj, 0) ThenBlock: { ReturnValue(0) }
+        keys = SHash.Keys(obj)
+        count = Array.Size(keys)
+        i = 0
+        WhileLoop LessThan(i, count) {
+            key = Array.Get(keys, i)
+            tagged = SHash.Lookup(obj, key)
+            IfCondition NotEqual(tagged, Arrays.NULL) ThenBlock: {
+                IfCondition NotEqual(tagged, 0) ThenBlock: { Deallocate(tagged, 16) }
+            }
+            i = Add(i, 1)
+        }
+        SHash.DestroyKeys(keys)
+        SHash.Destroy(obj)
+    }
+}
+
 Function.CCRead_SendError {
     Input: client_fd: Integer
     Input: id: Address
@@ -226,6 +250,8 @@ Function.CCRead_SendError {
         JSON.SetString(resp, "error", error_msg)
         out = JSON.SerializeObject(resp)
         Socket.SendMsg(client_fd, out)
+        Deallocate(out, Add(StringLength(out), 1))
+        CCRead_FreeShallow(resp)
     }
 }
 
@@ -243,6 +269,8 @@ Function.CCRead_SendResult {
         IfCondition EqualTo(truncated, 1) ThenBlock: { JSON.SetBool(resp, "truncated", 1) }
         out = JSON.SerializeObject(resp)
         Socket.SendMsg(client_fd, out)
+        Deallocate(out, Add(StringLength(out), 1))
+        CCRead_FreeShallow(resp)
     }
 }
 
@@ -262,6 +290,13 @@ Function.CCRead_SendSchema {
         }
         out = JSON.SerializeObject(resp)
         Socket.SendMsg(client_fd, out)
+        Deallocate(out, Add(StringLength(out), 1))
+        CCRead_FreeShallow(resp)
+        // schema_obj belongs to parsed; free the tree once, after resp.
+        JSON.Free(parsed)
+        IfCondition NotEqual(schema_str, 0) ThenBlock: {
+            Deallocate(schema_str, Add(StringLength(schema_str), 1))
+        }
     }
 }
 
@@ -318,8 +353,13 @@ Function.CCRead_HandleRequest {
                     marker = "\n[truncated: more bytes available]"
                     final = StringConcat(content, marker)
                     CCRead_SendResult(client_fd, id, final, 1)
+                    Deallocate(final, Add(StringLength(final), 1))
                 } ElseBlock: {
                     CCRead_SendResult(client_fd, id, content, 0)
+                }
+                IfCondition GreaterThan(CCReadState.content_cap, 0) ThenBlock: {
+                    Deallocate(content, CCReadState.content_cap)
+                    CCReadState.content_cap = 0
                 }
             }
             Deallocate(err_buf, 256)
@@ -384,6 +424,7 @@ SubRoutine.Main {
                 IfCondition NotEqual(req, 0) ThenBlock: {
                     IfCondition NotEqual(req, -1) ThenBlock: {
                         CCRead_HandleRequest(client_fd, req)
+                        Deallocate(req, Add(StringLength(req), 1))
                     }
                 }
             }
