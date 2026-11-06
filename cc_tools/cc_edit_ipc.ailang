@@ -616,8 +616,7 @@ SubRoutine.Main {
 
     fd = PlatformIPC_Listen(CCEditConst.SOCK_PATH, CCEditConst.BACKLOG)
     IfCondition LessThan(fd, 0) ThenBlock: {
-        PrintMessage("[cc_edit_ipc] listen failed
-")
+        PrintMessage("[cc_edit_ipc] listen failed\n")
         Exit(1)
     }
     CCEditState.listen_fd = fd

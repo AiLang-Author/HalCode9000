@@ -810,6 +810,18 @@ Function.CCBash_IsRedirectToSystemPath {
                 // Check if next char is '/'
                 IfCondition LessThan(j, len) ThenBlock: {
                     IfCondition EqualTo(GetByte(cmd, j), 47) ThenBlock: {  // '/'
+                        // /boot/home is the Haiku user tree. /boot and
+                        // /boot/system stay blocked. Linux /boot has no
+                        // /boot/home prefix, so this does not open it.
+                        home_ok = 0
+                        IfCondition EqualTo(CCBash_StartsAt(cmd, len, j, "/boot/home"), 1) ThenBlock: {
+                            nxt = Add(j, 10)
+                            IfCondition GreaterEqual(nxt, len) ThenBlock: { home_ok = 1 }
+                            IfCondition LessThan(nxt, len) ThenBlock: {
+                                IfCondition EqualTo(GetByte(cmd, nxt), 47) ThenBlock: { home_ok = 1 }
+                            }
+                        }
+                        IfCondition EqualTo(home_ok, 0) ThenBlock: {
                         c_after = 0
                         IfCondition LessThan(Add(j, 1), len) ThenBlock: {
                             c_after = GetByte(cmd, Add(j, 1))
@@ -821,6 +833,7 @@ Function.CCBash_IsRedirectToSystemPath {
                                 allowed = CCBash_IsAllowedDevSink(cmd, len, j)
                             }
                             IfCondition EqualTo(allowed, 0) ThenBlock: { ReturnValue(1) }
+                        }
                         }
                     }
                 }

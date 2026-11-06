@@ -1262,8 +1262,7 @@ SubRoutine.Main {
 
     fd = PlatformIPC_Listen(CCGrepConst.SOCK_PATH, CCGrepConst.BACKLOG)
     IfCondition LessThan(fd, 0) ThenBlock: {
-        PrintMessage("[cc_grep_ipc] listen failed
-")
+        PrintMessage("[cc_grep_ipc] listen failed\n")
         Exit(1)
     }
     CCGrepState.listen_fd = fd

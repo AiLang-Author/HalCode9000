@@ -555,9 +555,7 @@ SubRoutine.Main {
     SystemCall(CCVisSys.SYS_UNLINK, CCVisConst.SOCK_PATH, 0, 0, 0, 0)
 
     listen_fd = PlatformIPC_Listen(CCVisConst.SOCK_PATH, CCVisConst.BACKLOG)
-    IfCondition LessThan(listen_fd, 0) ThenBlock: { SystemCall(1, 1, "Failed socket\n", 14, 0, 0) SystemCall(60, 1, 0, 0, 0, 0) }
-
-    IfCondition LessThan(res, 0) ThenBlock: { SystemCall(1, 1, "Failed bind\n", 12, 0, 0) SystemCall(60, 1, 0, 0, 0, 0) }
+    IfCondition LessThan(listen_fd, 0) ThenBlock: { SystemCall(1, 1, "Failed listen\n", 14, 0, 0) SystemCall(60, 1, 0, 0, 0, 0) }
 
     CCVisState.listen_fd = listen_fd
 

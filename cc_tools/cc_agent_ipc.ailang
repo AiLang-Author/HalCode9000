@@ -444,7 +444,6 @@ SubRoutine.Main {
 
     fd = PlatformIPC_Listen(AgentConst.SOCK_PATH, AgentConst.BACKLOG)
     IfCondition LessThan(fd, 0) ThenBlock: { Exit(1) }
-    IfCondition LessThan(bind_rc, 0) ThenBlock: { Exit(1) }
     AgentState.listen_fd = fd
 
     WhileLoop EqualTo(AgentState.running, 1) {

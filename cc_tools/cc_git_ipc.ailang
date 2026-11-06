@@ -433,8 +433,7 @@ SubRoutine.Main {
 
     fd = PlatformIPC_Listen(CCGitConst.SOCK_PATH, CCGitConst.BACKLOG)
     IfCondition LessThan(fd, 0) ThenBlock: {
-        PrintMessage("[cc_git_ipc] listen failed
-")
+        PrintMessage("[cc_git_ipc] listen failed\n")
         Exit(1)
     }
     CCGitState.listen_fd = fd

@@ -930,8 +930,7 @@ SubRoutine.Main {
 
     fd = PlatformIPC_Listen(CCUndoConst.SOCK_PATH, CCUndoConst.BACKLOG)
     IfCondition LessThan(fd, 0) ThenBlock: {
-        PrintMessage("[cc_undo_ipc] listen failed
-")
+        PrintMessage("[cc_undo_ipc] listen failed\n")
         Exit(1)
     }
     CCUndoState.listen_fd = fd

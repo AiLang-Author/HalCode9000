@@ -525,8 +525,7 @@ SubRoutine.Main {
 
     fd = PlatformIPC_Listen(CCFindConst.SOCK_PATH, CCFindConst.BACKLOG)
     IfCondition LessThan(fd, 0) ThenBlock: {
-        PrintMessage("[cc_find_ipc] listen failed
-")
+        PrintMessage("[cc_find_ipc] listen failed\n")
         Exit(1)
     }
     CCFindState.listen_fd = fd

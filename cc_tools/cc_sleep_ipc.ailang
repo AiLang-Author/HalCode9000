@@ -160,9 +160,6 @@ SubRoutine.Main {
         PrintMessage("[cc_sleep_ipc] listen failed\n")
         Exit(1)
     }
-        PrintMessage("[cc_sleep_ipc] bind failed — another instance running?\n")
-        SystemCall(60, 1, 0, 0, 0, 0)
-    }
 
     CCSleepState.listen_fd = fd
     PrintMessage("[cc_sleep_ipc] listening on @halcode/Sleep\n")

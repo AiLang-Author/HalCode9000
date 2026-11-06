@@ -362,6 +362,9 @@ Function.CCWrite_IsSystemPath {
         IfCondition EqualTo(CCWrite_HasPrefix(path, "/usr/lib/"), 1) ThenBlock: { ReturnValue(1) }
         IfCondition EqualTo(CCWrite_HasPrefix(path, "/lib/"), 1) ThenBlock: { ReturnValue(1) }
         IfCondition EqualTo(CCWrite_HasPrefix(path, "/lib64/"), 1) ThenBlock: { ReturnValue(1) }
+        // Haiku's user files live at /boot/home. Linux /boot is the
+        // bootloader directory and does not use that prefix.
+        IfCondition EqualTo(CCWrite_HasPrefix(path, "/boot/home/"), 1) ThenBlock: { ReturnValue(0) }
         IfCondition EqualTo(CCWrite_HasPrefix(path, "/boot/"), 1) ThenBlock: { ReturnValue(1) }
         ReturnValue(0)
     }
